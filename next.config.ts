@@ -55,6 +55,12 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: import.meta.dirname,
   },
+  images: {
+    // images.unsplash.com serves the majutaja-brand login shell's rotating
+    // background photo (lib/unsplash.ts, app/api/auth-background/route.ts) -
+    // next/image refuses to optimize an external host that isn't listed here.
+    remotePatterns: [{ protocol: "https", hostname: "images.unsplash.com" }],
+  },
   env: {
     NEXT_PUBLIC_GIT_COMMIT: gitCommitHash,
     NEXT_PUBLIC_APP_VERSION: appVersion,

@@ -19,6 +19,7 @@ import { type OAuthMetadata } from "@/lib/oauth/discovery";
 import { generateCodeVerifier, generateCodeChallenge, generateState } from "@/lib/oauth/pkce";
 import { useUpdateStore, selectBanner } from "@/stores/update-store";
 import type { PublicJmapServerEntry } from "@/lib/admin/jmap-servers";
+import { AuthShell } from "@/components/auth/auth-shell";
 
 function findServerByDomain(servers: PublicJmapServerEntry[], email: string | undefined): PublicJmapServerEntry | undefined {
   if (!email || !email.includes("@")) return undefined;
@@ -456,18 +457,18 @@ export default function LoginPage() {
 
   if (configLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted/30">
+      <AuthShell>
         <div className="w-full max-w-sm mx-auto px-4 text-center" role="status">
           <Loader2 className="w-8 h-8 animate-spin text-primary mx-auto" />
           <span className="sr-only">{t("loading")}</span>
         </div>
-      </div>
+      </AuthShell>
     );
   }
 
   if (configError) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted/30">
+      <AuthShell>
         <div className="w-full max-w-md mx-auto px-4 text-center">
           <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl p-8">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
@@ -479,13 +480,13 @@ export default function LoginPage() {
             </p>
           </div>
         </div>
-      </div>
+      </AuthShell>
     );
   }
 
   if (!serverUrl && !demoMode && !allowCustomJmapEndpoint) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background to-muted/30">
+      <AuthShell>
         <div className="w-full max-w-md mx-auto px-4 text-center">
           <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl p-8">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
@@ -497,7 +498,7 @@ export default function LoginPage() {
             </p>
           </div>
         </div>
-      </div>
+      </AuthShell>
     );
   }
 
@@ -735,7 +736,7 @@ export default function LoginPage() {
   // Demo-only mode: show only a large demo login button
   if (demoMode && !isAddAccountMode) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-background via-muted/10 to-muted/30 relative px-4">
+      <AuthShell>
         {/* Theme toggle */}
         <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
           <button
@@ -882,12 +883,12 @@ export default function LoginPage() {
             {loginShowVersion && <VersionBadge />}
           </div>
         </div>
-      </div>
+      </AuthShell>
     );
   }
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-background via-muted/10 to-muted/30 relative px-4">
+    <AuthShell>
       {/* Theme toggle - top right, dropdown style */}
       <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
         <button
@@ -1407,6 +1408,6 @@ export default function LoginPage() {
           {loginShowVersion && <VersionBadge />}
         </div>
       </div>
-    </div>
+    </AuthShell>
   );
 }

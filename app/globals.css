@@ -6,6 +6,20 @@
 :root {
   font-size: var(--font-size-base);
 
+  /* majutaja.com brand accent scale — static across light/dark, matches the
+     main site's Tailwind tokens exactly. Used only by the login page's
+     AuthShell (components/auth/auth-shell.tsx) and the login form it wraps,
+     not the app-wide --color-* theme tokens above, so the rest of the
+     webmail UI is unaffected. */
+  --brand-50: #f7fbff;
+  --brand-100: #eef6ff;
+  --brand-200: #d1e7fe;
+  --brand-300: #b5d9fd;
+  --brand-500: #749dc4;
+  --brand-600: #5b7fa2;
+  --brand-700: #416180;
+  --brand-900: #1d2d3d;
+
   --color-border: #e2e8f0;
   --color-input: #e2e8f0;
   --color-ring: #94a3b8;

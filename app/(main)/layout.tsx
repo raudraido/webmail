@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { getLocaleDirection } from "@/i18n/direction";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Barlow, Barlow_Condensed } from "next/font/google";
 import { headers } from "next/headers";
 import { getLocale, getTranslations } from "next-intl/server";
 import { ServiceWorkerRegistration } from "@/components/service-worker-registration";
@@ -37,6 +37,22 @@ const geistSans = Geist({
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+});
+
+// majutaja.com brand typefaces — used only by the login page's AuthShell
+// and the heading it wraps, via the CSS vars below (opt-in, e.g.
+// `font-[family-name:var(--font-barlow-condensed)]`). The rest of the app
+// keeps Geist as its default font.
+const barlow = Barlow({
+  variable: "--font-barlow",
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+});
+
+const barlowCondensed = Barlow_Condensed({
+  variable: "--font-barlow-condensed",
+  subsets: ["latin"],
+  weight: ["600"],
 });
 
 // Resolve a branding value for the requesting host: per-domain override first,
@@ -236,7 +252,7 @@ export default async function RootLayout({
         />
       </head>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${geistSans.variable} ${geistMono.variable} ${barlow.variable} ${barlowCondensed.variable} antialiased`}
       >
         <ServiceWorkerRegistration />
         {!themeColorConfigured && <ThemeColorSync />}

@@ -58,6 +58,13 @@ migrateLegacyAdminLayout()
     const { startScheduler } = await import("./lib/version-check");
     await startScheduler();
   })
+  .then(async () => {
+    // Majutaja-brand login shell: pre-fetch the rotating background photo so
+    // the first visitor after a deploy/restart doesn't pay the Unsplash
+    // round-trip. No-op when UNSPLASH_ACCESS_KEY isn't configured.
+    const { warmNaturePhotoCache } = await import("./lib/unsplash");
+    await warmNaturePhotoCache();
+  })
   .catch((err) => {
     console.warn("Admin dashboard init skipped:", err instanceof Error ? err.message : err);
   });
