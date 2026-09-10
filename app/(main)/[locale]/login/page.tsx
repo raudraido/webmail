@@ -31,10 +31,15 @@ function findServerByDomain(servers: PublicJmapServerEntry[], email: string | un
 const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0";
 const GIT_COMMIT = process.env.NEXT_PUBLIC_GIT_COMMIT || "unknown";
 
+// Labels are resolved at render time via the "settings.appearance.theme"
+// namespace (option.value doubles as the translation key: "light" | "dark" |
+// "system") - the same namespace the in-app appearance settings page already
+// uses for these exact three labels, so the login page's toggle gets a real
+// translation for free instead of carrying its own hardcoded English copy.
 const THEME_OPTIONS = [
-  { value: "light" as const, icon: Sun, label: "Light" },
-  { value: "dark" as const, icon: Moon, label: "Dark" },
-  { value: "system" as const, icon: Monitor, label: "System" },
+  { value: "light" as const, icon: Sun },
+  { value: "dark" as const, icon: Moon },
+  { value: "system" as const, icon: Monitor },
 ];
 
 function VersionBadge() {
@@ -118,6 +123,7 @@ const MOBILE_REDIRECT_SCHEME = "bulwarkmobile://";
 export default function LoginPage() {
   const router = useRouter();
   const t = useTranslations("login");
+  const tTheme = useTranslations("settings.appearance.theme");
   const params = useParams();
   const searchParams = useSearchParams();
   const isAddAccountMode = searchParams.get("mode") === "add-account";
@@ -469,16 +475,14 @@ export default function LoginPage() {
   if (configError) {
     return (
       <AuthShell>
-        <div className="w-full max-w-md mx-auto px-4 text-center">
-          <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl p-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
-              <AlertCircle className="w-8 h-8 text-red-500" />
-            </div>
-            <h1 className="text-xl font-semibold text-foreground mb-2">{t("config_error.title")}</h1>
-            <p className="text-muted-foreground text-sm leading-relaxed">
-              {t("config_error.fetch_failed")}
-            </p>
+        <div className="w-full max-w-md mx-auto text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
+            <AlertCircle className="w-8 h-8 text-red-500" />
           </div>
+          <h1 className="text-2xl font-bold text-foreground mb-2">{t("config_error.title")}</h1>
+          <p className="text-muted-foreground text-sm leading-relaxed">
+            {t("config_error.fetch_failed")}
+          </p>
         </div>
       </AuthShell>
     );
@@ -487,16 +491,14 @@ export default function LoginPage() {
   if (!serverUrl && !demoMode && !allowCustomJmapEndpoint) {
     return (
       <AuthShell>
-        <div className="w-full max-w-md mx-auto px-4 text-center">
-          <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl p-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
-              <AlertCircle className="w-8 h-8 text-red-500" />
-            </div>
-            <h1 className="text-xl font-semibold text-foreground mb-2">{t("config_error.title")}</h1>
-            <p className="text-muted-foreground text-sm leading-relaxed">
-              {t("config_error.server_not_configured")}
-            </p>
+        <div className="w-full max-w-md mx-auto text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-500/10 mb-5">
+            <AlertCircle className="w-8 h-8 text-red-500" />
           </div>
+          <h1 className="text-2xl font-bold text-foreground mb-2">{t("config_error.title")}</h1>
+          <p className="text-muted-foreground text-sm leading-relaxed">
+            {t("config_error.server_not_configured")}
+          </p>
         </div>
       </AuthShell>
     );
@@ -749,12 +751,12 @@ export default function LoginPage() {
                 ? "bg-secondary border-border text-foreground shadow-md"
                 : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
             )}
-            aria-label={`Theme: ${currentThemeOption.label}`}
+            aria-label={`Theme: ${tTheme(currentThemeOption.value)}`}
             aria-expanded={showThemeMenu}
             aria-haspopup="menu"
           >
             <CurrentThemeIcon className="w-4 h-4" />
-            <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
+            <span className="hidden sm:inline" suppressHydrationWarning>{tTheme(currentThemeOption.value)}</span>
           </button>
 
           {showThemeMenu && (
@@ -783,7 +785,7 @@ export default function LoginPage() {
                     )}
                   >
                     <Icon className="w-4 h-4" />
-                    <span className="flex-1 text-start">{option.label}</span>
+                    <span className="flex-1 text-start">{tTheme(option.value)}</span>
                     {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
                   </button>
                 );
@@ -793,65 +795,63 @@ export default function LoginPage() {
         </div>
 
         <div className="w-full max-w-[440px] mx-auto">
-          <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl shadow-black/5 dark:shadow-black/20 overflow-hidden">
-            {/* Header with logo */}
-            <div className="px-8 pt-12 pb-4 text-center">
-              <div className="inline-flex items-center justify-center w-20 h-20 mb-6">
-                <img
-                  src={withBasePath(resolvedTheme === 'dark' ? loginLogoDarkUrl : loginLogoLightUrl)}
-                  alt={appName}
-                  className="max-w-20 max-h-20 object-contain"
-                />
-              </div>
-              <h1 className="text-3xl font-bold text-foreground tracking-tight">
-                {appName}
-              </h1>
-              <p className="text-base text-muted-foreground mt-2 max-w-xs mx-auto leading-relaxed">
-                {t("demo_tagline")}
-              </p>
+          {/* Header with logo */}
+          <div className="text-center">
+            <div className="inline-flex items-center justify-center w-20 h-20 mb-6">
+              <img
+                src={withBasePath(resolvedTheme === 'dark' ? loginLogoDarkUrl : loginLogoLightUrl)}
+                alt={appName}
+                className="max-w-20 max-h-20 object-contain"
+              />
             </div>
+            <h1 className="text-4xl font-bold text-foreground tracking-tight">
+              {appName}
+            </h1>
+            <p className="text-base text-muted-foreground mt-2 max-w-xs mx-auto leading-relaxed">
+              {t("demo_tagline")}
+            </p>
+          </div>
 
-            {/* Large demo button */}
-            <div className="px-8 pb-10 pt-4">
-              {error && (
-                <div className={cn(
-                  "mb-5 p-3 rounded-xl border border-destructive/20 bg-destructive/5 flex items-start gap-3",
-                  shakeError && "animate-shake"
-                )}>
-                  <div className="w-10 h-10 rounded-full bg-destructive/15 text-destructive flex items-center justify-center flex-shrink-0 shadow-sm">
-                    <AlertCircle className="w-5 h-5" />
-                  </div>
-                  <div className="flex-1 min-w-0 self-center">
-                    <p className="text-sm text-destructive leading-relaxed">
-                      {t(`error.${error}`) || t("error.generic")}
-                    </p>
-                  </div>
+          {/* Large demo button */}
+          <div className="mt-8">
+            {error && (
+              <div className={cn(
+                "mb-5 p-3 rounded-xl border border-destructive/20 bg-destructive/5 flex items-start gap-3",
+                shakeError && "animate-shake"
+              )}>
+                <div className="w-10 h-10 rounded-full bg-destructive/15 text-destructive flex items-center justify-center flex-shrink-0 shadow-sm">
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0 self-center">
+                  <p className="text-sm text-destructive leading-relaxed">
+                    {t(`error.${error}`) || t("error.generic")}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <Button
+              type="button"
+              className="w-full h-14 font-semibold text-lg bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30 hover:scale-[1.02] active:scale-[0.98]"
+              onClick={handleDemoLogin}
+              disabled={demoLoading || isLoading}
+            >
+              {demoLoading ? (
+                <div className="flex items-center gap-3">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  {t("demo_launching")}
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <Play className="w-5 h-5" />
+                  {t("demo_login_button")}
                 </div>
               )}
+            </Button>
 
-              <Button
-                type="button"
-                className="w-full h-14 font-semibold text-lg bg-primary hover:bg-primary/90 transition-all duration-200 rounded-xl shadow-lg shadow-primary/25 hover:shadow-xl hover:shadow-primary/30 hover:scale-[1.02] active:scale-[0.98]"
-                onClick={handleDemoLogin}
-                disabled={demoLoading || isLoading}
-              >
-                {demoLoading ? (
-                  <div className="flex items-center gap-3">
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    {t("demo_launching")}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-3">
-                    <Play className="w-5 h-5" />
-                    {t("demo_login_button")}
-                  </div>
-                )}
-              </Button>
-
-              <p className="text-center text-sm text-muted-foreground mt-4 leading-relaxed">
-                {t("demo_no_signup")}
-              </p>
-            </div>
+            <p className="text-center text-sm text-muted-foreground mt-4 leading-relaxed">
+              {t("demo_no_signup")}
+            </p>
           </div>
 
           {/* Footer */}
@@ -901,12 +901,12 @@ export default function LoginPage() {
               ? "bg-secondary border-border text-foreground shadow-md"
               : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
           )}
-          aria-label={`Theme: ${currentThemeOption.label}`}
+          aria-label={`Theme: ${tTheme(currentThemeOption.value)}`}
           aria-expanded={showThemeMenu}
           aria-haspopup="menu"
         >
           <CurrentThemeIcon className="w-4 h-4" />
-          <span className="hidden sm:inline" suppressHydrationWarning>{currentThemeOption.label}</span>
+          <span className="hidden sm:inline" suppressHydrationWarning>{tTheme(currentThemeOption.value)}</span>
         </button>
 
         {showThemeMenu && (
@@ -935,7 +935,7 @@ export default function LoginPage() {
                   )}
                 >
                   <Icon className="w-4 h-4" />
-                  <span className="flex-1 text-start">{option.label}</span>
+                  <span className="flex-1 text-start">{tTheme(option.value)}</span>
                   {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
                 </button>
               );
@@ -945,32 +945,30 @@ export default function LoginPage() {
       </div>
 
       <div className="w-full max-w-[400px] mx-auto">
-        {/* Card container */}
-        <div className="rounded-2xl border border-border/60 bg-background/80 backdrop-blur-sm shadow-xl shadow-black/5 dark:shadow-black/20 overflow-hidden">
-          {/* Header section with logo */}
-          <div className="px-8 pt-10 pb-6 text-center">
-            <div className={cn("inline-flex items-center justify-center mb-5", !hasLogoSize && "w-16 h-16")}>
-              <img
-                src={withBasePath(resolvedTheme === 'dark' ? loginLogoDarkUrl : loginLogoLightUrl)}
-                alt={appName}
-                className={cn("object-contain", !hasLogoSize && "max-w-16 max-h-16")}
-                style={loginLogoStyle}
-              />
-            </div>
-            {loginShowHeading && (
-              <h1 className="text-2xl font-semibold text-foreground tracking-tight">
-                {isAddAccountMode ? t("add_account_title") : appName}
-              </h1>
-            )}
-            {loginShowSubtitle && (
-              <p className="text-sm text-muted-foreground mt-1.5">
-                {isAddAccountMode ? t("add_account_subtitle") : (t("title") !== appName ? t("title") : "Sign in to your account")}
-              </p>
-            )}
+        {/* Header section with logo */}
+        <div className="text-center">
+          <div className={cn("inline-flex items-center justify-center mb-5", !hasLogoSize && "w-16 h-16")}>
+            <img
+              src={withBasePath(resolvedTheme === 'dark' ? loginLogoDarkUrl : loginLogoLightUrl)}
+              alt={appName}
+              className={cn("object-contain", !hasLogoSize && "max-w-16 max-h-16")}
+              style={loginLogoStyle}
+            />
           </div>
+          {loginShowHeading && (
+            <h1 className="text-4xl font-bold text-foreground tracking-tight">
+              {isAddAccountMode ? t("add_account_title") : appName}
+            </h1>
+          )}
+          {loginShowSubtitle && (
+            <p className="text-sm text-muted-foreground mt-2">
+              {isAddAccountMode ? t("add_account_subtitle") : (t("title") !== appName ? t("title") : "Sign in to your account")}
+            </p>
+          )}
+        </div>
 
-          {/* Form section */}
-          <div className="px-8 pb-8">
+        {/* Form section */}
+        <div className="mt-8">
             {/* Session Expired Banner */}
             {sessionExpired && (
               <div
@@ -1362,9 +1360,8 @@ export default function LoginPage() {
               </div>
             )}
           </div>
-        </div>
 
-        {/* Company name & links - below card */}
+        {/* Company name & links */}
         <div className="mt-6 flex flex-col items-center gap-2">
           {loginCompanyName && (
             <p className="text-center text-xs text-muted-foreground/60 font-medium">

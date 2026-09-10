@@ -101,6 +101,17 @@ export function FlagIT(props: FlagProps) {
 }
 
 /** Germany – Black, Red, Gold horizontal */
+/** Estonia – three equal horizontal bands: blue, black, white */
+export function FlagEE(props: FlagProps) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10" width={W} height={H} className={flagClass} {...props}>
+      <rect width="20" height="3.34" fill="#0072CE" />
+      <rect y="3.33" width="20" height="3.34" fill="#000" />
+      <rect y="6.66" width="20" height="3.34" fill="#fff" />
+    </svg>
+  );
+}
+
 export function FlagDE(props: FlagProps) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 5 3" width={W} height={H} className={flagClass} {...props}>
@@ -374,6 +385,7 @@ export const flagComponents: Record<string, (props: FlagProps) => ReactElement> 
   de: FlagDE,
   en: FlagGB,
   es: FlagES,
+  et: FlagEE,
   fr: FlagFR,
   hu: FlagHU,
   it: FlagIT,

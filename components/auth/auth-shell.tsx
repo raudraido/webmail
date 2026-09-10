@@ -38,7 +38,14 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <header className="absolute z-30 w-full">
+      {/* pointer-events-none: this header has no interactive content of its
+          own (just a logo mark + wordmark), but as a full-width absolutely
+          positioned element with an explicit z-index it forms a stacking
+          context that paints - and hit-tests - above everything in the form
+          column below it, including the theme toggle in the top-right
+          corner. Without this, clicks on the toggle silently land on this
+          header's empty space instead. */}
+      <header className="absolute z-30 w-full pointer-events-none">
         <div className="px-4 sm:px-6">
           <div className="flex h-16 items-center gap-2 md:h-20" suppressHydrationWarning>
             <img
