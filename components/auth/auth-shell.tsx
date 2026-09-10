@@ -40,17 +40,21 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen flex flex-col">
       <header className="absolute z-30 w-full">
         <div className="px-4 sm:px-6">
-          <div className="flex h-16 items-center md:h-20">
+          <div className="flex h-16 items-center gap-2 md:h-20" suppressHydrationWarning>
             <img
               src={withBasePath(
                 resolvedTheme === "dark"
-                  ? "/branding/majutaja-logo-horizontal-dark.png"
-                  : "/branding/majutaja-logo-horizontal.svg"
+                  ? "/branding/majutaja-icon-dark.svg"
+                  : "/branding/majutaja-icon.svg"
               )}
-              alt="majutaja.com"
-              className="h-7 w-auto md:h-8"
-              suppressHydrationWarning
+              alt=""
+              aria-hidden="true"
+              className="h-7 w-7 md:h-8 md:w-8"
             />
+            <span className="font-semibold text-lg md:text-xl text-gray-900 dark:text-white">
+              majutaja
+              <span className="text-[var(--brand-700)] dark:text-[var(--brand-300)]">.com</span>
+            </span>
           </div>
         </div>
       </header>
