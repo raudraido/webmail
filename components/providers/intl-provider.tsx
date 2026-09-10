@@ -26,6 +26,7 @@ export const LOCALE_LOADERS: Record<string, () => Promise<Messages>> = {
   de: () => import('@/locales/de/common.json').then((m) => m.default),
   en: () => Promise.resolve(enMessages as Messages),
   es: () => import('@/locales/es/common.json').then((m) => m.default),
+  et: () => import('@/locales/et/common.json').then((m) => m.default),
   he: () => import('@/locales/he/common.json').then((m) => m.default),
   fa: () => import('@/locales/fa/common.json').then((m) => m.default),
   fr: () => import('@/locales/fr/common.json').then((m) => m.default),

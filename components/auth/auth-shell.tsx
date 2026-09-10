@@ -1,15 +1,126 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
+import { useTranslations } from "next-intl";
+import { useShallow } from "zustand/react/shallow";
+import { Sun, Moon, Monitor, Check } from "lucide-react";
 import { apiFetch, withBasePath } from "@/lib/browser-navigation";
 import { useThemeStore } from "@/stores/theme-store";
+import { useMenuNavigation } from "@/hooks/use-menu-navigation";
+import { cn } from "@/lib/utils";
+import { LanguageSwitcher } from "@/components/ui/language-switcher";
 
 type AuthPhoto = {
   url: string;
   photographerName: string;
   photographerProfileUrl: string;
 };
+
+type Theme = "light" | "dark" | "system";
+
+const THEME_OPTIONS: { value: Theme; icon: typeof Sun }[] = [
+  { value: "light", icon: Sun },
+  { value: "dark", icon: Moon },
+  { value: "system", icon: Monitor },
+];
+
+// Icon-only theme toggle, bottom-left corner of the form column. Trigger
+// deliberately carries no text label (unlike the old top-right version this
+// replaces) - the corner is small and shared with nothing else, so the icon
+// alone is enough; the opened dropdown still spells out each option since
+// three similar-looking icons aren't self-explanatory on their own.
+function ThemeToggle() {
+  const t = useTranslations("settings.appearance.theme");
+  const { theme, setTheme } = useThemeStore(
+    useShallow((s) => ({ theme: s.theme, setTheme: s.setTheme }))
+  );
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  const { menuRef: listRef, onKeyDown } = useMenuNavigation<HTMLDivElement>({
+    open,
+    onClose: close,
+    triggerRef: buttonRef,
+  });
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const current = THEME_OPTIONS.find((o) => o.value === theme) ?? THEME_OPTIONS[2];
+  const CurrentIcon = current.icon;
+
+  const handleSelect = (value: Theme) => {
+    setTheme(value);
+    setOpen(false);
+  };
+
+  return (
+    <div className="absolute bottom-4 left-4 sm:left-6" ref={containerRef}>
+      <button
+        type="button"
+        ref={buttonRef}
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          "flex items-center justify-center w-9 h-9 rounded-xl border transition-all duration-200",
+          open
+            ? "bg-secondary border-border text-foreground shadow-md"
+            : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
+        )}
+        aria-label={`Theme: ${t(current.value)}`}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <CurrentIcon className="w-4 h-4" />
+      </button>
+
+      {open && (
+        <div
+          ref={listRef}
+          onKeyDown={onKeyDown}
+          // Opens upward (bottom-full, not top-full) - this trigger sits at
+          // the bottom of the column, so a downward menu would spill off the
+          // viewport instead of overlapping the form above it.
+          className="absolute left-0 bottom-full mb-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
+          role="menu"
+          aria-label="Theme selection"
+        >
+          {THEME_OPTIONS.map((option) => {
+            const Icon = option.icon;
+            const isActive = theme === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={isActive}
+                onClick={() => handleSelect(option.value)}
+                className={cn(
+                  "w-full flex items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
+                  isActive
+                    ? "bg-primary/10 text-foreground font-medium"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+              >
+                <Icon className="w-4 h-4" />
+                <span className="flex-1 text-start">{t(option.value)}</span>
+                {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Reproduces majutaja.com's own auth-page chrome (the fork's previous
 // in-house login screen): a fixed logo header, a fixed-width form panel next
@@ -39,13 +150,26 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen flex flex-col">
       {/* pointer-events-none: this header has no interactive content of its
-          own (just a logo mark + wordmark), but as a full-width absolutely
-          positioned element with an explicit z-index it forms a stacking
-          context that paints - and hit-tests - above everything in the form
-          column below it, including the theme toggle in the top-right
-          corner. Without this, clicks on the toggle silently land on this
-          header's empty space instead. */}
-      <header className="absolute z-30 w-full pointer-events-none">
+          own directly - just a logo mark + wordmark and (below) the language
+          switcher, which opts itself back into pointer-events - but as a
+          full-width absolutely positioned element with an explicit z-index
+          it forms a stacking context that paints, and hit-tests, above
+          everything in the form column below it. Without this, clicks on
+          anything in that same top band (previously the theme toggle, now
+          the language switcher) would silently land on this header's empty
+          space instead. */}
+      {/* w-full lg:w-[410px]: matches the form column's own responsive width
+          below exactly (that div's class is literally "relative w-full
+          lg:w-[410px] lg:shrink-0"). This header has no positioned ancestor
+          of its own (the root wrapper above is position:static), so its
+          "absolute" resolves against the viewport - without capping its
+          width here too, it would span the full page instead of just the
+          column, and a right-aligned control inside it (the language
+          switcher below) would land at the screen's right edge, over the
+          photo pane, instead of the column's own top-right corner.
+          Confirmed via a live boundingClientRect check before this fix:
+          header was 1400px wide against a 410px column. */}
+      <header className="absolute z-30 w-full lg:w-[410px] pointer-events-none">
         <div className="px-4 sm:px-6">
           <div className="flex h-16 items-center gap-2 md:h-20" suppressHydrationWarning>
             <img
@@ -62,6 +186,14 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
               majutaja
               <span className="text-[var(--brand-700)] dark:text-[var(--brand-300)]">.com</span>
             </span>
+            {/* pointer-events-auto: the header itself is pointer-events-none
+                (see comment above), so this - the only interactive thing in
+                it - needs its own opt back in, or it renders but can't be
+                clicked, same failure mode the old top-right theme toggle had
+                before it moved out of this header entirely. */}
+            <div className="ms-auto pointer-events-auto">
+              <LanguageSwitcher />
+            </div>
           </div>
         </div>
       </header>
@@ -85,6 +217,12 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
           <div className="absolute inset-x-0 bottom-4 text-center text-xs text-gray-400 dark:text-gray-500">
             © {new Date().getFullYear()} – majutaja.com™
           </div>
+          {/* Mirrors the copyright line above (same bottom-4 offset within
+              this same relative column) but corner-anchored to the left
+              instead of centered, so it doesn't collide with that centered
+              text. This column has no pointer-events restriction (unlike the
+              header above), so no extra opt-in is needed here. */}
+          <ThemeToggle />
         </div>
 
         <div className="relative hidden lg:block lg:min-w-0 lg:flex-1">

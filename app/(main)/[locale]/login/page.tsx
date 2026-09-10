@@ -11,10 +11,9 @@ import { useAccountStore } from "@/stores/account-store";
 import { useThemeStore } from "@/stores/theme-store";
 import { useShallow } from "zustand/react/shallow";
 import { useConfig } from "@/hooks/use-config";
-import { useMenuNavigation } from "@/hooks/use-menu-navigation";
 import { apiFetch, getPathPrefix, toRouterPath, withBasePath } from "@/lib/browser-navigation";
 import { cn } from "@/lib/utils";
-import { AlertCircle, Loader2, X, Info, Eye, EyeOff, LogIn, Sun, Moon, Monitor, Check, Shield, Play, Copy } from "lucide-react";
+import { AlertCircle, Loader2, X, Info, Eye, EyeOff, LogIn, Check, Shield, Play, Copy } from "lucide-react";
 import { type OAuthMetadata } from "@/lib/oauth/discovery";
 import { generateCodeVerifier, generateCodeChallenge, generateState } from "@/lib/oauth/pkce";
 import { useUpdateStore, selectBanner } from "@/stores/update-store";
@@ -30,17 +29,6 @@ function findServerByDomain(servers: PublicJmapServerEntry[], email: string | un
 
 const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "0.0.0";
 const GIT_COMMIT = process.env.NEXT_PUBLIC_GIT_COMMIT || "unknown";
-
-// Labels are resolved at render time via the "settings.appearance.theme"
-// namespace (option.value doubles as the translation key: "light" | "dark" |
-// "system") - the same namespace the in-app appearance settings page already
-// uses for these exact three labels, so the login page's toggle gets a real
-// translation for free instead of carrying its own hardcoded English copy.
-const THEME_OPTIONS = [
-  { value: "light" as const, icon: Sun },
-  { value: "dark" as const, icon: Moon },
-  { value: "system" as const, icon: Monitor },
-];
 
 function VersionBadge() {
   const [copied, setCopied] = useState(false);
@@ -123,7 +111,6 @@ const MOBILE_REDIRECT_SCHEME = "bulwarkmobile://";
 export default function LoginPage() {
   const router = useRouter();
   const t = useTranslations("login");
-  const tTheme = useTranslations("settings.appearance.theme");
   const params = useParams();
   const searchParams = useSearchParams();
   const isAddAccountMode = searchParams.get("mode") === "add-account";
@@ -140,8 +127,8 @@ export default function LoginPage() {
   const mobileState = mobileRedirectUri ? rawMobileState : "";
   const isMobileHandoff = Boolean(mobileRedirectUri);
   const { login, loginDemo, isLoading, error, clearError, isAuthenticated } = useAuthStore();
-  const { theme, setTheme, initializeTheme } = useThemeStore(useShallow((s) => ({ theme: s.theme, setTheme: s.setTheme, initializeTheme: s.initializeTheme })));
-  const { appName, jmapServerUrl: configuredServerUrl, oauthEnabled, oauthOnly, oauthClientId: globalOauthClientId, oauthIssuerUrl: globalOauthIssuerUrl, oauthScopes, rememberMeEnabled, devMode, demoMode, loginLogoLightUrl, loginLogoDarkUrl, loginCompanyName, loginImprintUrl, loginPrivacyPolicyUrl, loginWebsiteUrl, loginLogoMaxHeight, loginLogoMaxWidth, loginShowHeading, loginShowSubtitle, loginShowTotp, loginShowVersion, isLoading: configLoading, error: configError, autoSsoEnabled, embeddedMode: _embeddedMode, allowCustomJmapEndpoint, jmapServers, jmapServerAutoPickByDomain } = useConfig();
+  const initializeTheme = useThemeStore((s) => s.initializeTheme);
+  const { appName, jmapServerUrl: configuredServerUrl, oauthEnabled, oauthOnly, oauthClientId: globalOauthClientId, oauthIssuerUrl: globalOauthIssuerUrl, oauthScopes, rememberMeEnabled, devMode, demoMode, loginLogoLightUrl, loginLogoDarkUrl, loginCompanyName, loginImprintUrl, loginPrivacyPolicyUrl, loginWebsiteUrl, loginLogoMaxHeight, loginLogoMaxWidth, loginShowSubtitle, loginShowTotp, loginShowVersion, isLoading: configLoading, error: configError, autoSsoEnabled, embeddedMode: _embeddedMode, allowCustomJmapEndpoint, jmapServers, jmapServerAutoPickByDomain } = useConfig();
   const resolvedTheme = useThemeStore((s) => s.resolvedTheme);
 
   // Login logo sizing: when a max height/width is configured, drop the fixed
@@ -178,7 +165,6 @@ export default function LoginPage() {
   const [sessionExpired, setSessionExpired] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [shakeError, setShakeError] = useState(false);
-  const [showThemeMenu, setShowThemeMenu] = useState(false);
 
   const [savedUsernames, setSavedUsernames] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
@@ -194,14 +180,6 @@ export default function LoginPage() {
   const justSelectedSuggestion = useRef(false);
   const totpInputRef = useRef<HTMLInputElement>(null);
   const prevError = useRef<string | null>(null);
-  const themeMenuRef = useRef<HTMLDivElement>(null);
-  const themeButtonRef = useRef<HTMLButtonElement>(null);
-  const closeThemeMenu = useCallback(() => setShowThemeMenu(false), []);
-  const { menuRef: themeListRef, onKeyDown: onThemeMenuKeyDown } = useMenuNavigation<HTMLDivElement>({
-    open: showThemeMenu,
-    onClose: closeThemeMenu,
-    triggerRef: themeButtonRef,
-  });
   // Captured by handleSubmit when in mobile handoff mode; consumed by the
   // isAuthenticated effect to build the deep-link fragment.
   const mobileHandoffPayloadRef = useRef<{ server_url: string; username: string; password: string } | null>(null);
@@ -342,9 +320,6 @@ export default function LoginPage() {
           inputRef.current && !inputRef.current.contains(event.target as Node)) {
         setShowSuggestions(false);
       }
-      if (themeMenuRef.current && !themeMenuRef.current.contains(event.target as Node)) {
-        setShowThemeMenu(false);
-      }
     };
 
     document.addEventListener("mousedown", handleClickOutside);
@@ -455,11 +430,6 @@ export default function LoginPage() {
     autoSsoTriggered.current = true;
     startServerSideSso();
   }, [autoSsoEnabled, oauthOnly, oauthDiscoveryDone, oauthMetadata, ssoError, isAddAccountMode, isAuthenticated, jmapServers.length, startServerSideSso]);
-
-  const handleThemeSelect = useCallback((newTheme: "light" | "dark" | "system") => {
-    setTheme(newTheme);
-    setShowThemeMenu(false);
-  }, [setTheme]);
 
   if (configLoading) {
     return (
@@ -703,9 +673,6 @@ export default function LoginPage() {
     setDemoLoading(false);
   };
 
-  const currentThemeOption = THEME_OPTIONS.find(o => o.value === theme) || THEME_OPTIONS[2];
-  const CurrentThemeIcon = currentThemeOption.icon;
-
   // Server picker (when admin has configured a server list). Rendered by both
   // the password form and the OAuth-only branch - with several servers the user
   // has to pick which one SSO targets before the button starts the flow, since
@@ -739,61 +706,6 @@ export default function LoginPage() {
   if (demoMode && !isAddAccountMode) {
     return (
       <AuthShell>
-        {/* Theme toggle */}
-        <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
-          <button
-            type="button"
-            ref={themeButtonRef}
-            onClick={() => setShowThemeMenu(!showThemeMenu)}
-            className={cn(
-              "flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition-all duration-200",
-              showThemeMenu
-                ? "bg-secondary border-border text-foreground shadow-md"
-                : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
-            )}
-            aria-label={`Theme: ${tTheme(currentThemeOption.value)}`}
-            aria-expanded={showThemeMenu}
-            aria-haspopup="menu"
-          >
-            <CurrentThemeIcon className="w-4 h-4" />
-            <span className="hidden sm:inline" suppressHydrationWarning>{tTheme(currentThemeOption.value)}</span>
-          </button>
-
-          {showThemeMenu && (
-            <div
-              ref={themeListRef}
-              onKeyDown={onThemeMenuKeyDown}
-              className="absolute right-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
-              role="menu"
-              aria-label="Theme selection"
-            >
-              {THEME_OPTIONS.map((option) => {
-                const Icon = option.icon;
-                const isActive = theme === option.value;
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={isActive}
-                    onClick={() => handleThemeSelect(option.value)}
-                    className={cn(
-                      "w-full flex items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
-                      isActive
-                        ? "bg-primary/10 text-foreground font-medium"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                    )}
-                  >
-                    <Icon className="w-4 h-4" />
-                    <span className="flex-1 text-start">{tTheme(option.value)}</span>
-                    {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
         <div className="w-full max-w-[440px] mx-auto">
           {/* Header with logo */}
           <div className="text-center">
@@ -804,10 +716,7 @@ export default function LoginPage() {
                 className="max-w-20 max-h-20 object-contain"
               />
             </div>
-            <h1 className="text-4xl font-bold text-foreground tracking-tight">
-              {appName}
-            </h1>
-            <p className="text-base text-muted-foreground mt-2 max-w-xs mx-auto leading-relaxed">
+            <p className="text-base text-muted-foreground max-w-xs mx-auto leading-relaxed">
               {t("demo_tagline")}
             </p>
           </div>
@@ -889,61 +798,6 @@ export default function LoginPage() {
 
   return (
     <AuthShell>
-      {/* Theme toggle - top right, dropdown style */}
-      <div className="absolute top-5 right-5" ref={themeMenuRef} suppressHydrationWarning>
-        <button
-          type="button"
-          ref={themeButtonRef}
-          onClick={() => setShowThemeMenu(!showThemeMenu)}
-          className={cn(
-            "flex items-center gap-2 px-3 py-2 rounded-xl border text-sm transition-all duration-200",
-            showThemeMenu
-              ? "bg-secondary border-border text-foreground shadow-md"
-              : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
-          )}
-          aria-label={`Theme: ${tTheme(currentThemeOption.value)}`}
-          aria-expanded={showThemeMenu}
-          aria-haspopup="menu"
-        >
-          <CurrentThemeIcon className="w-4 h-4" />
-          <span className="hidden sm:inline" suppressHydrationWarning>{tTheme(currentThemeOption.value)}</span>
-        </button>
-
-        {showThemeMenu && (
-          <div
-            ref={themeListRef}
-            onKeyDown={onThemeMenuKeyDown}
-            className="absolute right-0 top-full mt-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
-            role="menu"
-            aria-label="Theme selection"
-          >
-            {THEME_OPTIONS.map((option) => {
-              const Icon = option.icon;
-              const isActive = theme === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={isActive}
-                  onClick={() => handleThemeSelect(option.value)}
-                  className={cn(
-                    "w-full flex items-center gap-3 px-3.5 py-2.5 text-sm transition-colors",
-                    isActive
-                      ? "bg-primary/10 text-foreground font-medium"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  )}
-                >
-                  <Icon className="w-4 h-4" />
-                  <span className="flex-1 text-start">{tTheme(option.value)}</span>
-                  {isActive && <Check className="w-3.5 h-3.5 text-primary" />}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
       <div className="w-full max-w-[400px] mx-auto">
         {/* Header section with logo */}
         <div className="text-center">
@@ -955,13 +809,8 @@ export default function LoginPage() {
               style={loginLogoStyle}
             />
           </div>
-          {loginShowHeading && (
-            <h1 className="text-4xl font-bold text-foreground tracking-tight">
-              {isAddAccountMode ? t("add_account_title") : appName}
-            </h1>
-          )}
           {loginShowSubtitle && (
-            <p className="text-sm text-muted-foreground mt-2">
+            <p className="text-sm text-muted-foreground">
               {isAddAccountMode ? t("add_account_subtitle") : (t("title") !== appName ? t("title") : "Sign in to your account")}
             </p>
           )}

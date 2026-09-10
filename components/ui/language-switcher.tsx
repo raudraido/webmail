@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { useLocale } from 'next-intl';
 import { useLocaleStore } from '@/stores/locale-store';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -48,6 +49,14 @@ function FlagIcon({ locale }: { locale: string }) {
 export function LanguageSwitcher({ className }: { className?: string }) {
   const setLocale = useLocaleStore((state) => state.setLocale);
   const choice = useLocaleStore((state) => state.locale) || 'auto';
+  // The currently-resolved locale (URL/cookie/Accept-Language, per
+  // i18n/routing.ts - falls back to NEXT_PUBLIC_DEFAULT_LOCALE, "et" for this
+  // deployment). "auto" itself isn't a flaggable locale, so without this the
+  // trigger shows no flag at all while the choice is "auto" (the default for
+  // anyone who hasn't explicitly picked a language) - resolve to the actual
+  // active locale for display purposes only; the stored "auto" choice and its
+  // label are untouched.
+  const activeLocale = useLocale();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -59,6 +68,7 @@ export function LanguageSwitcher({ className }: { className?: string }) {
   });
 
   const current = languages.find((l) => l.value === choice) ?? languages[0];
+  const currentFlagLocale = current.value === 'auto' ? activeLocale : current.value;
 
   // Close on outside click
   useEffect(() => {
@@ -92,7 +102,7 @@ export function LanguageSwitcher({ className }: { className?: string }) {
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <FlagIcon locale={current.value} />
+        <FlagIcon locale={currentFlagLocale} />
         <span className="flex-1 text-start">{current.label}</span>
         <ChevronDown className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform duration-150", open && "rotate-180")} />
       </button>
