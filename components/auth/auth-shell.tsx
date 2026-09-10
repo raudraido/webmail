@@ -192,7 +192,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
                 clicked, same failure mode the old top-right theme toggle had
                 before it moved out of this header entirely. */}
             <div className="ms-auto pointer-events-auto">
-              <LanguageSwitcher />
+              <LanguageSwitcher iconOnly />
             </div>
           </div>
         </div>

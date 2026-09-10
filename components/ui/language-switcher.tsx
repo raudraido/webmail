@@ -46,12 +46,12 @@ function FlagIcon({ locale }: { locale: string }) {
   return <Flag />;
 }
 
-export function LanguageSwitcher({ className }: { className?: string }) {
+export function LanguageSwitcher({ className, iconOnly = false }: { className?: string; iconOnly?: boolean }) {
   const setLocale = useLocaleStore((state) => state.setLocale);
   const choice = useLocaleStore((state) => state.locale) || 'auto';
-  // The currently-resolved locale (URL/cookie/Accept-Language, per
-  // i18n/routing.ts - falls back to NEXT_PUBLIC_DEFAULT_LOCALE, "et" for this
-  // deployment). "auto" itself isn't a flaggable locale, so without this the
+  // The currently-resolved locale (URL locale, or else NEXT_PUBLIC_DEFAULT_LOCALE
+  // per i18n/routing.ts - never the browser's Accept-Language, see that file's
+  // own localeDetection comment). "auto" itself isn't a flaggable locale, so without this the
   // trigger shows no flag at all while the choice is "auto" (the default for
   // anyone who hasn't explicitly picked a language) - resolve to the actual
   // active locale for display purposes only; the stored "auto" choice and its
@@ -98,13 +98,21 @@ export function LanguageSwitcher({ className }: { className?: string }) {
         type="button"
         ref={buttonRef}
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-md bg-muted border border-border text-foreground hover:border-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors duration-150 cursor-pointer w-full"
+        className={cn(
+          "flex items-center gap-2 rounded-md bg-muted border border-border text-foreground hover:border-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors duration-150 cursor-pointer",
+          iconOnly ? "justify-center w-9 h-9" : "px-3 py-1.5 text-sm w-full"
+        )}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={iconOnly ? `Language: ${current.label}` : undefined}
       >
         <FlagIcon locale={currentFlagLocale} />
-        <span className="flex-1 text-start">{current.label}</span>
-        <ChevronDown className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform duration-150", open && "rotate-180")} />
+        {!iconOnly && (
+          <>
+            <span className="flex-1 text-start">{current.label}</span>
+            <ChevronDown className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform duration-150", open && "rotate-180")} />
+          </>
+        )}
       </button>
 
       {open && (

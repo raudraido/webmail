@@ -14,9 +14,9 @@ const localePrefix = (process.env.NEXT_PUBLIC_LOCALE_PREFIX ?? 'never') as
 
 const SUPPORTED_LOCALES = ['ar', 'ca', 'cs', 'da', 'de', 'en', 'es', 'et', 'fa', 'fr', 'he', 'hu', 'it', 'ja', 'ko', 'lv', 'mn', 'nb', 'nl', 'pl', 'pt', 'ro', 'ru', 'sk', 'tr', 'uk', 'zh', 'zh-TW'] as const;
 
-// Fallback locale used when the visitor's Accept-Language header does not
-// match any supported locale (and no NEXT_LOCALE cookie is set yet). Admins
-// set this via NEXT_PUBLIC_DEFAULT_LOCALE at build time to localise greenfield
+// Locale a visitor gets with no URL locale prefix and no NEXT_LOCALE cookie
+// yet - i.e. the locale next-intl's middleware renders by default. Admins set
+// this via NEXT_PUBLIC_DEFAULT_LOCALE at build time to localise greenfield
 // deployments without having every user change their preference manually.
 const envDefaultLocale = process.env.NEXT_PUBLIC_DEFAULT_LOCALE?.trim();
 const resolvedDefaultLocale =
@@ -27,7 +27,23 @@ const resolvedDefaultLocale =
 export const routing = defineRouting({
   locales: SUPPORTED_LOCALES,
   defaultLocale: resolvedDefaultLocale,
-  localePrefix
+  localePrefix,
+  // Without this, next-intl's middleware negotiates the initial locale from
+  // the visitor's Accept-Language header (and remembers that via its own
+  // NEXT_LOCALE cookie) whenever there's no locale in the URL - meaning
+  // NEXT_PUBLIC_DEFAULT_LOCALE above only ever won when Accept-Language
+  // matched nothing at all, not the deterministic default the setting's name
+  // implies. Confirmed live: an en-GB browser saw English instead of the
+  // configured Estonian default. `localeDetection: false` disables both the
+  // Accept-Language negotiation and its cookie, so defaultLocale always wins
+  // for a visitor with no explicit choice - matching the same fix the old
+  // in-house fork (root-fr/jmap-webmail) shipped for the same requirement
+  // ("Eesti alati esimesena, sõltumata brauseri keelest"). A locale in the
+  // URL (when NEXT_PUBLIC_LOCALE_PREFIX allows one) and this app's own
+  // client-side language switcher (stores/locale-store.ts, independent of
+  // next-intl's cookie) are unaffected - this only removes the automatic
+  // guess for a visitor who hasn't chosen anything yet.
+  localeDetection: false
 });
 
 export const locales = routing.locales;

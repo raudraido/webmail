@@ -8,7 +8,6 @@ import { getBrowserTimeZone, resolveTimeZone } from '@/lib/timezone';
 import enMessages from '@/locales/en/common.json';
 import { getLocaleDirection } from '@/i18n/direction';
 import { mergeMessages } from '@/i18n/merge-messages';
-import { detectBrowserLocale } from '@/i18n/detect-locale';
 
 type Messages = Record<string, unknown>;
 
@@ -82,14 +81,19 @@ export function IntlProvider({ locale: initialLocale, messages: initialMessages,
   }, []);
 
   // Resolve the active locale from the user's stored choice. Empty or 'auto'
-  // means "follow the browser" (English default); a specific code forces it and
-  // is never overridden by detection. Loading a not-yet-cached catalog is
-  // async; until it lands we keep rendering the previous locale.
+  // means "use the server-resolved default" (initialLocale, seeded from
+  // NEXT_PUBLIC_DEFAULT_LOCALE via i18n/routing.ts - see its own
+  // localeDetection comment); a specific code forces it and is never
+  // overridden. This used to re-derive a guess from the browser's own
+  // Accept-Language preference here on the client (detectBrowserLocale),
+  // independently of whatever the server had already resolved - which both
+  // duplicated the server's job and could silently override the configured
+  // default with e.g. a browser's preferred supported language the visitor
+  // never actually chose, the same class of bug fixed server-side by
+  // localeDetection: false. Loading a not-yet-cached catalog is async; until
+  // it lands we keep rendering the previous locale.
   useEffect(() => {
-    const target =
-      !currentLocale || currentLocale === 'auto'
-        ? detectBrowserLocale(initialLocale)
-        : currentLocale;
+    const target = !currentLocale || currentLocale === 'auto' ? initialLocale : currentLocale;
 
     const cached = loadedRef.current[target];
     if (cached) {
