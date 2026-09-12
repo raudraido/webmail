@@ -82,7 +82,13 @@ let themeSyncPromise: Promise<void> | null = null;
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set, get) => ({
-      theme: 'system',
+      // 'light' (not 'system'): majutaja.com's own brand is always light,
+      // never following OS dark-mode preference by default - a first-time
+      // visitor should see the white/brand-gray shell, not a dark one just
+      // because their OS theme happens to be dark. Users can still switch
+      // to Dark/System explicitly via the toggle; this only changes what an
+      // unset (fresh browser) preference resolves to.
+      theme: 'light',
       resolvedTheme: 'light',
       hydrated: false,
       installedThemes: [...BUILTIN_THEMES],
