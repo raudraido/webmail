@@ -211,7 +211,7 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
           className="pointer-events-none absolute bottom-0 left-0 -translate-x-1/3"
           aria-hidden="true"
         >
-          <div className="h-80 w-80 rounded-full bg-gradient-to-tr from-[var(--brand-500)] opacity-40 blur-[160px]" />
+          <div className="h-80 w-80 rounded-full bg-gradient-to-tr from-[var(--brand-500)] opacity-70 blur-[160px]" />
         </div>
 
         <div className="relative w-full lg:w-[410px] lg:shrink-0">
