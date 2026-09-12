@@ -241,7 +241,14 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
                 alt=""
                 fill
                 sizes="(min-width: 1024px) calc(100vw - 410px), 0px"
-                className="-z-10 object-cover"
+                // No negative z-index here (unlike this section's earlier
+                // version) - the gradient scrim and credit line below are
+                // later siblings in the same parent, so normal DOM order
+                // already paints them on top with no z-index needed. A
+                // negative z-index instead put this image behind the shell
+                // root's own bg-gray-50, which has no transparency to see
+                // through - the actual bug the user hit live.
+                className="object-cover"
                 priority
               />
               <div
