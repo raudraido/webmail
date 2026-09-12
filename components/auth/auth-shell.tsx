@@ -148,7 +148,10 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <div className="min-h-screen flex flex-col">
+    // bg-gray-50: majutaja.com's own root layout sets this exact class on
+    // <body> (app/layout.tsx there) — the real site's auth pages are never
+    // pure white. Scoped to this shell only, not the rest of the app.
+    <div className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-950">
       {/* pointer-events-none: this header has no interactive content of its
           own directly - just a logo mark + wordmark and (below) the language
           switcher, which opts itself back into pointer-events - but as a
@@ -172,6 +175,11 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
       <header className="absolute z-30 w-full lg:w-[410px] pointer-events-none">
         <div className="px-4 sm:px-6">
           <div className="flex h-16 items-center gap-2 md:h-20" suppressHydrationWarning>
+            {/* Fixed 34px, flat text-xl, font-[family-name:var(--font-barlow-condensed)] —
+                exact match for majutaja.com's own components/ui/logo.tsx
+                (size=34 default, className="text-xl", font-heading which
+                resolves to Barlow Condensed there). No responsive stepping:
+                the real site's Logo doesn't have any either. */}
             <img
               src={withBasePath(
                 resolvedTheme === "dark"
@@ -180,9 +188,9 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
               )}
               alt=""
               aria-hidden="true"
-              className="h-7 w-7 md:h-8 md:w-8"
+              className="h-[34px] w-[34px]"
             />
-            <span className="font-semibold text-lg md:text-xl text-gray-900 dark:text-white">
+            <span className="font-[family-name:var(--font-barlow-condensed)] font-semibold text-xl text-gray-900 dark:text-white">
               majutaja
               <span className="text-[var(--brand-700)] dark:text-[var(--brand-300)]">.com</span>
             </span>
