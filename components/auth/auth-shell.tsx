@@ -183,8 +183,8 @@ export function AuthShell({ children }: { children: React.ReactNode }) {
             <img
               src={withBasePath(
                 resolvedTheme === "dark"
-                  ? "/branding/majutaja-icon-dark.svg"
-                  : "/branding/majutaja-icon.svg"
+                  ? "/branding/majutaja-mark-dark.svg"
+                  : "/branding/majutaja-mark.svg"
               )}
               alt=""
               aria-hidden="true"
