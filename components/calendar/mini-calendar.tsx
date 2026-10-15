@@ -2,7 +2,7 @@
 
 import { useState, useMemo, Fragment } from "react";
 import { useTranslations } from "next-intl";
-import { ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
+import { ChevronLeft, ChevronRight, ChevronDown } from "@/components/icons";
 import {
   addMonths, subMonths, addYears, subYears, setMonth, setYear,
   getISOWeek, getWeek, format,
@@ -12,6 +12,7 @@ import { getEventDayBounds } from "@/lib/calendar-utils";
 import { displayNow } from "@/lib/timezone";
 import type { CalendarEvent } from "@/lib/jmap/types";
 import { useCalendarLocale } from "@/hooks/use-calendar-locale";
+import { PluginDayLabel } from "./plugin-day-label";
 
 type PickerView = "days" | "months" | "years";
 
@@ -187,15 +188,19 @@ export function MiniCalendar({
                   className={cn(
                     "relative flex items-center justify-center w-7 h-7 text-xs rounded-full transition-colors",
                     !inMonth && "text-muted-foreground/40",
-                    inMonth && !selected && "hover:bg-muted",
-                    today && !selected && "font-bold text-primary",
-                    selected && "bg-primary text-primary-foreground"
+                    // Today is the filled circle; the selected day is tinted.
+                    today && "bg-primary text-primary-foreground font-semibold",
+                    selected && !today && "bg-primary/15 text-primary font-semibold",
+                    !today && !selected && "hover:bg-muted"
                   )}
+                  aria-current={today ? "date" : undefined}
+                  aria-pressed={selected}
                 >
                   {formatDayNumber(day)}
-                  {hasEvent && !selected && (
+                  {hasEvent && !selected && !today && (
                     <span className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-primary" />
                   )}
+                  <PluginDayLabel surface="mini-calendar-marks" date={format(day, "yyyy-MM-dd")} />
                 </button>
               </Fragment>
             );

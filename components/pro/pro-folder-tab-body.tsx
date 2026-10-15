@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Folder, Loader2, Paperclip, RefreshCw, Star } from "lucide-react";
-import { cn, formatDate } from "@/lib/utils";
+import { Folder, Loader2, Paperclip, RefreshCw, Star } from "@/components/icons";
+import { cn, cleanPreview, formatDate } from "@/lib/utils";
 import { localizeMailboxName } from "@/lib/mailbox-label";
 import { EmailViewer } from "@/components/email/email-viewer";
 import { ProEmailView } from "@/components/pro/pro-email-tab-body";
@@ -14,6 +14,7 @@ import { useProTabStore, type ProFolderTabData } from "@/stores/pro-tab-store";
 import { useDeviceDetection } from "@/hooks/use-media-query";
 import { usePaneId } from "@/hooks/use-pane-context";
 import type { Email, Mailbox } from "@/lib/jmap/types";
+import { emailHooks } from "@/lib/plugin-hooks";
 
 interface ProFolderTabBodyProps {
   tabId: string;
@@ -85,17 +86,24 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
     if (!client) return;
     const seq = ++fetchSeqRef.current;
     if (position === 0) setIsLoading(true); else setIsLoadingMore(true);
-    // getEmails never throws - it reports failures as an empty page.
-    const result = await client.getEmails(jmapMailboxId, jmapAccountId, emailsPerPage, position, undefined, true, undefined, getMessageListOrderFor(mailboxRole));
-    if (seq !== fetchSeqRef.current) return;
-    setEmails((prev) => {
-      if (position === 0) return result.emails;
-      const known = new Set(prev.map((e) => e.id));
-      return [...prev, ...result.emails.filter((e) => !known.has(e.id))];
-    });
-    setTotal(result.total);
-    setHasMore(result.hasMore);
-    if (position === 0) setIsLoading(false); else setIsLoadingMore(false);
+    try {
+      const result = await client.getEmails(jmapMailboxId, jmapAccountId, emailsPerPage, position, undefined, true, undefined, getMessageListOrderFor(mailboxRole));
+      if (seq !== fetchSeqRef.current) return;
+      setEmails((prev) => {
+        if (position === 0) return result.emails;
+        const known = new Set(prev.map((e) => e.id));
+        return [...prev, ...result.emails.filter((e) => !known.has(e.id))];
+      });
+      setTotal(result.total);
+      setHasMore(result.hasMore);
+    } catch (error) {
+      // Keep what is on screen: a failed page is not an empty folder.
+      console.error('Failed to load folder tab:', error);
+    } finally {
+      if (seq === fetchSeqRef.current) {
+        if (position === 0) setIsLoading(false); else setIsLoadingMore(false);
+      }
+    }
   }, [client, jmapMailboxId, jmapAccountId, emailsPerPage, mailboxRole]);
 
   useEffect(() => {
@@ -111,16 +119,24 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
     }
   }, [hasMore, isLoadingMore, isLoading, loadPage, emails.length]);
 
-  const markRowAsRead = useCallback((email: Email) => {
+  const markRowAsRead = useCallback(async (email: Email) => {
     if (!client || email.keywords?.$seen) return;
+    // Straight to the client: the store's markAsRead only serves emails in
+    // its own (global) list, which this tab's rows are not part of. So the
+    // plugin hooks the store action fires are fired here.
+    if (emailHooks.onBeforeEmailReadStateChange.size > 0
+      && !(await emailHooks.onBeforeEmailReadStateChange.intercept({ emailIds: [email.id], read: true }))) {
+      return;
+    }
     setEmails((prev) => prev.map((e) => e.id === email.id
       ? { ...e, keywords: { ...e.keywords, $seen: true } }
       : e));
-    // Straight to the client: the store's markAsRead only serves emails in
-    // its own (global) list, which this tab's rows are not part of.
-    void client.markAsRead(email.id, true, jmapAccountId).catch((err) => {
+    try {
+      await client.markAsRead(email.id, true, jmapAccountId);
+      void emailHooks.onEmailReadStateChange.emit({ emailIds: [email.id], read: true });
+    } catch (err) {
       console.error('Mark as read failed:', err);
-    });
+    }
   }, [client, jmapAccountId]);
 
   const openAsEmailTab = useCallback((email: Email, reuseReader: boolean) => {
@@ -136,7 +152,7 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
   }, [data.mailboxId, paneId, t]);
 
   const handleRowClick = useCallback((email: Email) => {
-    markRowAsRead(email);
+    void markRowAsRead(email);
     if (isMobile) {
       // No room for a reading pane - promote to a dedicated email tab.
       openAsEmailTab(email, true);
@@ -233,9 +249,9 @@ export function ProFolderTabBody({ tabId, data }: ProFolderTabBodyProps) {
                       <Star className="h-3.5 w-3.5 flex-shrink-0 fill-yellow-400 text-yellow-400" aria-hidden="true" />
                     )}
                   </div>
-                  {email.preview && (
+                  {cleanPreview(email.preview) && (
                     <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                      {email.preview}
+                      {cleanPreview(email.preview)}
                     </div>
                   )}
                 </div>

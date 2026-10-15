@@ -5,8 +5,9 @@ import { useTranslations } from 'next-intl';
 import { useSettingsStore } from '@/stores/settings-store';
 import type { ReplyIdentityMatch, SendDelaySeconds } from '@/stores/settings-store';
 import { useAuthStore } from '@/stores/auth-store';
+import { usePolicyStore } from '@/stores/policy-store';
 import { SettingsSection, SettingItem, Select, ToggleSwitch } from './settings-section';
-import { X } from 'lucide-react';
+import { X } from '@/components/icons';
 import {
   SUPPORTED_SUB_ADDRESS_DELIMITERS,
   isSupportedSubAddressDelimiter,
@@ -28,6 +29,7 @@ export function ComposingSettings() {
     attachmentReminderEnabled,
     attachmentReminderKeywords,
     emptySubjectWarningEnabled,
+    recipientMentionsEnabled,
     sendDelaySeconds,
     subAddressDelimiter,
     signaturePosition,
@@ -38,6 +40,8 @@ export function ComposingSettings() {
   } = useSettingsStore();
   const { client } = useAuthStore();
   const delayedSendSupported = client?.hasDelayedSend() ?? false;
+  // Catch-all matching only rewrites From, which the admin can switch off.
+  const customFromEnabled = usePolicyStore((s) => s.isFeatureEnabled('customFromEnabled'));
 
   return (
     <SettingsSection title={t('title')} description={t('description')}>
@@ -48,7 +52,7 @@ export function ComposingSettings() {
         />
       </SettingItem>
 
-      {autoSelectReplyIdentity && (
+      {autoSelectReplyIdentity && customFromEnabled && (
         <SettingItem label={t('reply_identity_match.label')} description={t('reply_identity_match.description')}>
           <Select
             value={replyIdentityMatch}
@@ -177,6 +181,13 @@ export function ComposingSettings() {
         <ToggleSwitch
           checked={emptySubjectWarningEnabled}
           onChange={(checked) => updateSetting('emptySubjectWarningEnabled', checked)}
+        />
+      </SettingItem>
+
+      <SettingItem label={t('recipient_mentions.label')} description={t('recipient_mentions.description')}>
+        <ToggleSwitch
+          checked={recipientMentionsEnabled}
+          onChange={(checked) => updateSetting('recipientMentionsEnabled', checked)}
         />
       </SettingItem>
 

@@ -2,11 +2,12 @@
 
 import { useMemo, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
-import { Search, BookUser, Trash2, Users, Download, X, UserPlus, CheckSquare, Square, Filter, Mail, Phone, Image as ImageIcon, RotateCcw, Menu, ArrowDownAZ } from "lucide-react";
+import { Search, BookUser, Trash2, Users, Download, X, UserPlus, CheckSquare, Square, Filter, Mail, Phone, Image as ImageIcon, RotateCcw, Menu, ArrowDownAZ } from "@/components/icons";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ContactListItem } from "./contact-list-item";
 import { ContactContextMenu } from "./contact-context-menu";
+import { PluginActions } from "@/components/plugins/plugin-actions";
 import { useContextMenu } from "@/hooks/use-context-menu";
 import { cn } from "@/lib/utils";
 import type { AnniversaryDate, ContactCard } from "@/lib/jmap/types";
@@ -114,6 +115,8 @@ interface ContactListProps {
   onAddContactToGroup: (id: string) => void;
   /** Show a burger button at the start that opens the (overlay) categories sidebar. */
   onMenuClick?: () => void;
+  /** The first fetch is still running: show placeholders, not "No contacts yet". */
+  isLoading?: boolean;
 }
 
 export function ContactList({
@@ -136,6 +139,7 @@ export function ContactList({
   onDeleteContact,
   onAddContactToGroup,
   onMenuClick,
+  isLoading = false,
 }: ContactListProps) {
   const t = useTranslations("contacts");
   const locale = useLocale();
@@ -265,6 +269,7 @@ export function ContactList({
   }, [sorted, locale, sortByLastName]);
 
   const hasSelection = selectedContactIds.size > 0;
+  const pluginContext = useMemo(() => ({ contactIds: [...selectedContactIds] }), [selectedContactIds]);
   const allSelected = sorted.length > 0 && sorted.every(c => selectedContactIds.has(c.id));
 
   return (
@@ -518,6 +523,7 @@ export function ContactList({
             <Trash2 className="w-3.5 h-3.5 me-1" />
             {t("bulk.delete")}
           </Button>
+          <PluginActions surface="contact-list-actions" context={pluginContext} />
           <Button variant="ghost" size="icon" onClick={onClearSelection} className="h-7 w-7">
             <X className="w-3.5 h-3.5" />
           </Button>
@@ -526,7 +532,19 @@ export function ContactList({
 
       {/* Contact list */}
       <div className="flex-1 overflow-y-auto">
-        {sorted.length === 0 ? (
+        {sorted.length === 0 && isLoading && !searchQuery && activeFilters === 0 ? (
+          <div aria-hidden className="py-1" data-testid="contact-list-skeleton">
+            {Array.from({ length: 8 }, (_, i) => (
+              <div key={i} className="flex items-center gap-3 px-4 py-2.5">
+                <div className="w-9 h-9 rounded-full bg-muted animate-pulse shrink-0" />
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <div className="h-3.5 rounded bg-muted animate-pulse" style={{ width: `${45 + ((i * 29) % 35)}%` }} />
+                  <div className="h-3 rounded bg-muted/70 animate-pulse" style={{ width: `${30 + ((i * 17) % 30)}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : sorted.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full px-6 text-center">
             {searchQuery || activeFilters > 0 ? (
               <>

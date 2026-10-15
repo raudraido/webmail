@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Save, Loader2, Lock, Plus, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
-import { icons as lucideIcons, type LucideIcon } from 'lucide-react';
+import { Save, Loader2, Lock, Plus, Trash2, ArrowUp, ArrowDown } from '@/components/icons';
+import { iconForName } from '@/components/icons';
 import type { SettingsPolicy, FeatureGates, PushRelayOption, AdminSidebarApp } from '@/lib/admin/types';
 import { DEFAULT_FEATURE_GATES, DEFAULT_POLICY } from '@/lib/admin/types';
 import { apiFetch } from '@/lib/browser-navigation';
@@ -32,16 +32,20 @@ const FEATURE_GATE_LABELS: Partial<Record<keyof FeatureGates, { label: string; d
   debugModeEnabled: { label: 'Debug Mode', description: 'Allow users to enable debug/diagnostic mode' },
   folderIconsEnabled: { label: 'Folder Icons', description: 'Allow custom folder icon picker' },
   hoverActionsConfigEnabled: { label: 'Hover Actions Config', description: 'Allow users to customize email hover actions' },
+  tabTitleSubjectEnabled: { label: 'Subject in Tab Title', description: 'Show the open message\'s subject in the browser tab title. Browsers also keep the title in history and screen shares show it; turn this off when mailboxes hold confidential correspondence, and the tab shows the folder instead.' },
   filesEnabled: { label: 'Files (WebDAV)', description: 'Enable file storage via WebDAV. WARNING: Large uploads can cause Stalwart/RocksDB instability. Not recommended for production.' },
   crossUnreadViewEnabled: { label: 'Unified Mailbox: Unread', description: 'Allow an "Unread" entry in the Unified Mailbox section that lists unread mail across the account and its shared folders (or every account when the cross-account sub-option is on). Honors the user\'s folder selection. Requires the matching per-user toggle in Settings → Appearance.' },
   crossStarredViewEnabled: { label: 'Unified Mailbox: Starred', description: 'Allow a "Starred" entry in the Unified Mailbox section that lists flagged/starred mail across the account and its shared folders (or every account when the cross-account sub-option is on). Honors the user\'s folder selection. Requires the matching per-user toggle in Settings → Appearance.' },
   crossAllViewEnabled: { label: 'Unified Mailbox: All Mail', description: 'Allow an "All mail" entry in the Unified Mailbox section that lists all mail across the account and its shared folders (or every account when the cross-account sub-option is on). Honors the user\'s folder selection. Requires the matching per-user toggle in Settings → Appearance.' },
   unifiedCrossAccountEnabled: { label: 'Unified Mailbox: Cross-account', description: 'Allow users to expand the Unified Mailbox beyond the active account boundary so its lists merge across every logged-in account. When off, the Unified Mailbox stays within the active account and its shared folders.' },
+  accountArchiveEnabled: { label: 'Account List Backup', description: 'Let users save their list of accounts (address, server, label, colour) on this server, encrypted in the browser with a password of their choice, and restore it on another device. No mailbox passwords are stored. Archives live in SETTINGS_DATA_DIR/account-archives; requires SESSION_SECRET.' },
+  customFromEnabled: { label: 'Custom From Address', description: 'Let users type any sender address in the composer instead of picking one of their identities, and let replies to a catch-all address on their domain send from that address. Turn this off when users may only send as their configured identities.' },
 };
 
 const RESTRICTABLE_SETTINGS = [
   { key: 'fontSize', label: 'Font Size', category: 'Appearance', type: 'enum', allowedValues: ['small', 'medium', 'large'] },
   { key: 'density', label: 'Density', category: 'Appearance', type: 'enum', allowedValues: ['compact', 'regular', 'spacious'] },
+  { key: 'interfaceLayout', label: 'Interface Layout', category: 'Appearance', type: 'enum', allowedValues: ['default', 'mountain-view'] },
   { key: 'animationsEnabled', label: 'Animations', category: 'Appearance', type: 'boolean' },
   { key: 'markAsReadDelay', label: 'Mark as Read Delay', category: 'Email', type: 'number' },
   { key: 'deleteAction', label: 'Delete Action', category: 'Email', type: 'enum', allowedValues: ['trash', 'trash-and-read', 'permanent'] },
@@ -57,6 +61,7 @@ const RESTRICTABLE_SETTINGS = [
   { key: 'sessionTimeout', label: 'Session Timeout', category: 'Privacy', type: 'number' },
   { key: 'emailNotificationsEnabled', label: 'Email Notifications', category: 'Notifications', type: 'boolean' },
   { key: 'calendarNotificationsEnabled', label: 'Calendar Notifications', category: 'Notifications', type: 'boolean' },
+  { key: 'pushNotifyInboxOnly', label: 'Inbox-only Push Notifications', category: 'Notifications', type: 'boolean' },
   { key: 'debugMode', label: 'Debug Mode', category: 'Advanced', type: 'boolean' },
 ];
 
@@ -455,7 +460,7 @@ export function PolicyTab() {
           )}
 
           {defaultSidebarApps.map((app, index) => {
-            const AppIcon = lucideIcons[app.icon as keyof typeof lucideIcons] as LucideIcon | undefined;
+            const AppIcon = iconForName(app.icon);
             const urlInvalid = app.url.trim().length > 0 && !isValidDefaultAppUrl(app.url);
             return (
               <div key={app.id} className="rounded-md border border-border bg-muted/20 p-3 space-y-2">
@@ -493,7 +498,7 @@ export function PolicyTab() {
                   <div className="sm:col-span-3">
                     <label className="block text-[11px] font-medium text-muted-foreground mb-1">
                       Icon (
-                      <a href="https://lucide.dev/icons" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">Lucide</a>
+                      <a href="https://tabler.io/icons" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">Tabler</a>
                       )
                     </label>
                     <div className="flex items-center gap-2">
@@ -504,7 +509,7 @@ export function PolicyTab() {
                         maxLength={64}
                         value={app.icon}
                         onChange={(e) => updateDefaultApp(index, { icon: e.target.value })}
-                        placeholder="Globe"
+                        placeholder="world"
                         className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       />
                       <span

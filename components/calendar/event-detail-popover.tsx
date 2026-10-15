@@ -7,21 +7,26 @@ import { Button } from "@/components/ui/button";
 import { LinkifiedText } from "@/components/ui/linkified-text";
 import {
   X, Clock, MapPin, Video, Users, Repeat, Bell, AlignLeft,
-  Pencil, Trash2, Copy, Send, Check,
-} from "lucide-react";
+  Pencil, Trash2, Copy, Send, Check, MoreVertical, Calendar as CalendarIcon,
+} from "@/components/icons";
 import { format, isSameDay } from "date-fns";
 import { cn } from "@/lib/utils";
 import type { CalendarEvent, Calendar, CalendarParticipant } from "@/lib/jmap/types";
 import { parseDuration, getEventColor } from "./event-card";
 import { getEventDisplayEndDate, getEventEndDate, getEventStartDate } from "@/lib/calendar-utils";
 import { buildRecurrenceSummary } from "./recurrence-editor";
+import { formatEventAlertsLabel } from "./alert-list-editor";
 import {
   getUserParticipantId,
   getUserStatus,
   getParticipantList,
 } from "@/lib/calendar-participants";
-import { getEventEditability } from "@/lib/calendar-editability";
+import { canUserRsvp, getEventEditability, type EditabilityContext } from "@/lib/calendar-editability";
 import { useFormatEventDate } from "@/hooks/use-format-event-date";
+import { useContactNameResolver } from "@/hooks/use-contact-name-resolver";
+import { findMeetingLink, locationAction, mapsUrl, primaryLocationName } from "@/lib/event-links";
+import { PluginSlot } from "@/components/plugins/plugin-slot";
+import { eventToView } from "@/lib/plugin-projection";
 
 interface EventDetailPopoverProps {
   event: CalendarEvent;
@@ -30,6 +35,8 @@ interface EventDetailPopoverProps {
   onEdit: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
+  /** Opens the event's full action menu (export, copy, ...) at the click. */
+  onMore?: (e: React.MouseEvent) => void;
   onClose: () => void;
   onSaveNote: (note: string) => void;
   onRsvp?: (status: CalendarParticipant["participationStatus"]) => void;
@@ -42,9 +49,15 @@ interface EventDetailPopoverProps {
 }
 
 const POPOVER_WIDTH = 360;
+const HEADER_BUTTON = "p-1.5 rounded-md hover:bg-muted transition-colors duration-150 text-muted-foreground hover:text-foreground";
 const POPOVER_GAP = 8;
 const VIEWPORT_MARGIN = 12;
 const MAX_HEIGHT = 480;
+
+/** As tall as MAX_HEIGHT, but never taller than the window. */
+function maxPopoverHeight(): number {
+  return Math.max(0, Math.min(MAX_HEIGHT, window.innerHeight - 2 * VIEWPORT_MARGIN));
+}
 
 function computePosition(
   anchorRect: DOMRect,
@@ -52,7 +65,7 @@ function computePosition(
 ): { top: number; left: number } {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const clampedHeight = Math.min(popoverHeight, MAX_HEIGHT);
+  const clampedHeight = Math.min(popoverHeight, maxPopoverHeight());
 
   const clampTop = (top: number) =>
     Math.min(Math.max(VIEWPORT_MARGIN, top), vh - clampedHeight - VIEWPORT_MARGIN);
@@ -89,21 +102,6 @@ function formatDurationDisplay(minutes: number): string {
   return `${h}h${m}min`;
 }
 
-function getAlertLabel(event: CalendarEvent, t: ReturnType<typeof useTranslations>): string | null {
-  if (!event.alerts) return null;
-  const first = Object.values(event.alerts)[0];
-  if (!first || !first.trigger || first.trigger["@type"] !== "OffsetTrigger") return null;
-  const offset = first.trigger.offset;
-  if (offset === "PT0S") return t("alerts.at_time");
-  const minMatch = offset.match(/-?PT?(\d+)M$/);
-  if (minMatch) return t("alerts.minutes_before", { count: parseInt(minMatch[1]) });
-  const hourMatch = offset.match(/-?PT?(\d+)H$/);
-  if (hourMatch) return t("alerts.hours_before", { count: parseInt(hourMatch[1]) });
-  const dayMatch = offset.match(/-?P(\d+)D/);
-  if (dayMatch) return t("alerts.days_before", { count: parseInt(dayMatch[1]) });
-  return null;
-}
-
 function getRecurrenceLabel(event: CalendarEvent, t: ReturnType<typeof useTranslations>, locale: string): string | null {
   if (!event.recurrenceRules?.length) return null;
   return buildRecurrenceSummary(event.recurrenceRules[0], t, locale);
@@ -116,6 +114,7 @@ export function EventDetailPopover({
   onEdit,
   onDelete,
   onDuplicate,
+  onMore,
   onClose,
   onSaveNote,
   onRsvp,
@@ -137,6 +136,10 @@ export function EventDetailPopover({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isSavingNote, setIsSavingNote] = useState(false);
 
+  // Bare addresses (the organizer above all — Stalwart drops its display name)
+  // render with the contact card's name instead of the raw email.
+  const resolveContactName = useContactNameResolver();
+
   const color = getEventColor(event, calendar);
   const startDate = getEventStartDate(event);
   const durationMinutes = parseDuration(event.duration);
@@ -144,32 +147,67 @@ export function EventDetailPopover({
   const displayEndDate = getEventDisplayEndDate(event);
   const isMultiDay = !isSameDay(startDate, displayEndDate);
 
-  const locationName = useMemo(() => {
-    if (!event.locations) return null;
-    return Object.values(event.locations)[0]?.name || null;
-  }, [event.locations]);
+  const locationName = useMemo(() => primaryLocationName(event) ?? null, [event]);
 
-  const virtualLocation = useMemo(() => {
-    if (!event.virtualLocations) return null;
-    const first = Object.values(event.virtualLocations)[0];
-    return first?.uri || null;
-  }, [event.virtualLocations]);
+  // Invitations (Teams above all) leave virtualLocations empty and bury the
+  // join URL in the description; surface it as the meeting link anyway.
+  const meeting = useMemo(() => findMeetingLink(event), [event]);
+  const pluginProps = useMemo(() => ({ event: eventToView(event) }), [event]);
+  const virtualLocation = meeting?.uri ?? null;
 
-  const participants = useMemo(() => getParticipantList(event), [event]);
+  // A URL opens as a link, a location that only names the service joins the
+  // meeting, a postal address opens in the maps.
+  const locationHref = useMemo(() => {
+    if (!locationName) return null;
+    const action = locationAction(locationName, meeting);
+    return action.kind === "url" ? action.uri : mapsUrl(action.query);
+  }, [locationName, meeting]);
+  const [locationCopied, setLocationCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+  }, []);
+  const copyLocation = useCallback(async () => {
+    if (!locationName) return;
+    try {
+      await navigator.clipboard.writeText(locationName);
+      setLocationCopied(true);
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setLocationCopied(false), 1500);
+    } catch {
+      // clipboard refused (insecure context or permission) - nothing to do
+    }
+  }, [locationName]);
+
+  const participants = useMemo(
+    () => getParticipantList(event, { resolveName: resolveContactName }),
+    [event, resolveContactName]
+  );
   const recurrenceLabel = useMemo(() => getRecurrenceLabel(event, t, locale), [event, t, locale]);
-  const alertLabel = useMemo(() => getAlertLabel(event, t), [event, t]);
+  const alertLabel = useMemo(() => formatEventAlertsLabel(event, calendar ? [calendar] : [], t), [event, calendar, t]);
 
   // Gate affordances on calendar rights, not identity (see calendar-editability).
-  const editability = useMemo(() => {
+  const editabilityCtx = useMemo<EditabilityContext>(() => {
     const calendarsById = new Map(calendar ? [[calendar.id, calendar]] : []);
-    return getEventEditability(event, {
+    return {
       calendarsById,
       userCalendarAddresses: currentUserEmails,
       isSubscriptionCalendar: isSubscriptionCalendar ?? (() => false),
-    });
-  }, [event, calendar, currentUserEmails, isSubscriptionCalendar]);
+    };
+  }, [calendar, currentUserEmails, isSubscriptionCalendar]);
+
+  const editability = useMemo(
+    () => getEventEditability(event, editabilityCtx),
+    [event, editabilityCtx]
+  );
   const canEditBody = editability === "editable";
-  const rsvpMode = editability === "rsvp-only";
+
+  // Asked separately from editability: a received invite lands in the user's own
+  // calendar and resolves to 'editable', which renders no RSVP bar (#937).
+  const canRsvp = useMemo(
+    () => canUserRsvp(event, editabilityCtx),
+    [event, editabilityCtx]
+  );
 
   const userParticipantId = useMemo(
     () => getUserParticipantId(event, currentUserEmails),
@@ -192,6 +230,19 @@ export function EventDetailPopover({
     setPosition(computePosition(anchorRect, height));
     if (!ready) requestAnimationFrame(() => setReady(true));
   }, [anchorRect, noteExpanded, showDeleteConfirm, ready]);
+
+  // Content that grows after the popover was placed (a plugin section reports
+  // its height a moment later) moves it again, so it stays in the window.
+  useEffect(() => {
+    const node = popoverRef.current;
+    if (!node || isMobile || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const next = computePosition(anchorRect, node.offsetHeight);
+      setPosition((prev) => (prev && prev.top === next.top && prev.left === next.left ? prev : next));
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [anchorRect, isMobile]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -269,14 +320,14 @@ export function EventDetailPopover({
         "fixed z-[60] bg-background border border-border shadow-xl overflow-hidden transition-[opacity,transform] duration-150 ease-out",
         isMobile
           ? "inset-0 rounded-none flex flex-col"
-          : "rounded-lg"
+          : "rounded-lg flex flex-col"
       )}
       style={isMobile ? {
         opacity: 1,
         transform: "none",
       } : {
         width: POPOVER_WIDTH,
-        maxHeight: MAX_HEIGHT,
+        maxHeight: maxPopoverHeight(),
         top: position?.top ?? -9999,
         left: position?.left ?? -9999,
         opacity: ready ? 1 : 0,
@@ -284,53 +335,103 @@ export function EventDetailPopover({
         visibility: position ? "visible" : "hidden",
       }}
     >
-      {/* Color accent bar */}
-      <div className="h-1 w-full" style={{ backgroundColor: color }} />
-
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2 px-4 pt-3 pb-1">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span
-              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-              style={{ backgroundColor: color }}
-            />
-            <h3 className={cn(
-              "text-base font-semibold truncate text-foreground",
-              event.status === "cancelled" && "line-through text-muted-foreground"
-            )}>
-              {event.title || t("events.no_title")}
-            </h3>
-          </div>
-          {calendar && (
-            <p className="text-xs text-muted-foreground mt-0.5 ps-[18px]">
-              {calendar.name}
-              {event.status === "tentative" && (
-                <span className="ms-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning/15 text-warning">
-                  {t("detail.tentative")}
-                </span>
-              )}
-              {event.status === "cancelled" && (
-                <span className="ms-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 line-through">
-                  {t("detail.cancelled")}
-                </span>
-              )}
-            </p>
-          )}
-        </div>
+      {/* Actions sit at the top, the event's colour square beside its title. */}
+      <div className="flex items-center justify-end gap-0.5 px-2 pt-2">
+        {canEditBody && (
+          <button
+            type="button"
+            onClick={onEdit}
+            className={HEADER_BUTTON}
+            aria-label={t("events.edit")}
+            title={t("events.edit")}
+          >
+            <Pencil className="w-4 h-4" />
+          </button>
+        )}
+        {canEditBody && (
+          <button
+            type="button"
+            onClick={() => setShowDeleteConfirm(true)}
+            className={HEADER_BUTTON}
+            aria-label={t("events.delete")}
+            title={t("events.delete")}
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
         <button
+          type="button"
+          onClick={onMore ?? onDuplicate}
+          className={HEADER_BUTTON}
+          aria-label={onMore ? t("toolbar.more") : t("events.duplicate")}
+          title={onMore ? t("toolbar.more") : t("events.duplicate")}
+        >
+          {onMore ? <MoreVertical className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+        </button>
+        <button
+          type="button"
           onClick={onClose}
-          className="p-1.5 rounded-md hover:bg-muted transition-colors duration-150 flex-shrink-0 mt-0.5 text-muted-foreground hover:text-foreground"
+          className={HEADER_BUTTON}
           aria-label={t("form.cancel")}
         >
           <X className="w-4 h-4" />
         </button>
       </div>
 
+      {showDeleteConfirm && (
+        <div className="mx-4 mt-1 mb-2 flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2">
+          <span className="text-sm text-destructive flex-1">
+            {t("detail.delete_confirm")}
+          </span>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={onDelete}
+            className="h-7 text-xs"
+          >
+            {t("events.delete")}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowDeleteConfirm(false)}
+            className="h-7 text-xs"
+          >
+            {t("form.cancel")}
+          </Button>
+        </div>
+      )}
+
+      <div className="flex items-start gap-2.5 px-4 pb-1">
+        <span
+          className="w-4 h-4 rounded-sm flex-shrink-0 mt-1"
+          style={{ backgroundColor: color }}
+          aria-hidden="true"
+        />
+        <div className="min-w-0 flex-1">
+          <h3 className={cn(
+            "text-lg font-semibold leading-snug break-words text-foreground",
+            event.status === "cancelled" && "line-through text-muted-foreground"
+          )}>
+            {event.title || t("events.no_title")}
+          </h3>
+          {event.status === "tentative" && (
+            <span className="mt-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-warning/15 text-warning">
+              {t("detail.tentative")}
+            </span>
+          )}
+          {event.status === "cancelled" && (
+            <span className="mt-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 line-through">
+              {t("detail.cancelled")}
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* Content */}
       <div className={cn(
         "px-4 py-2 space-y-2.5 overflow-y-auto",
-        isMobile ? "flex-1" : ""
+        isMobile ? "flex-1" : "min-h-0"
       )} style={isMobile ? undefined : { maxHeight: MAX_HEIGHT - 140 }}>
         {/* Date & Time */}
         <div className="flex items-start gap-2.5">
@@ -388,21 +489,28 @@ export function EventDetailPopover({
         {locationName && (
           <div className="flex items-start gap-2.5">
             <MapPin className="w-4 h-4 text-muted-foreground mt-0.5 flex-shrink-0" />
-            {/^https?:\/\//i.test(locationName) ? (
-              <a
-                href={locationName}
-                target="_blank"
-                rel="noreferrer"
-                className="text-sm text-primary hover:underline truncate"
-                title={locationName}
-              >
-                {(() => {
+            <a
+              href={locationHref ?? undefined}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm text-primary hover:underline min-w-0 break-words"
+              title={locationName}
+            >
+              {/^https?:\/\//i.test(locationName)
+                ? (() => {
                   try { return new URL(locationName).hostname; } catch { return locationName; }
-                })()}
-              </a>
-            ) : (
-              <span className="text-sm text-foreground">{locationName}</span>
-            )}
+                })()
+                : locationName}
+            </a>
+            <button
+              type="button"
+              onClick={copyLocation}
+              className="ms-auto p-0.5 text-muted-foreground hover:text-foreground flex-shrink-0"
+              title={t("detail.copy_location")}
+              aria-label={t("detail.copy_location")}
+            >
+              {locationCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            </button>
           </div>
         )}
 
@@ -476,6 +584,14 @@ export function EventDetailPopover({
           </div>
         )}
 
+        {/* Calendar */}
+        {calendar && (
+          <div className="flex items-start gap-2.5">
+            <CalendarIcon className="w-4 h-4 text-muted-foreground mt-0.5 flex-shrink-0" />
+            <span className="text-sm text-foreground truncate">{calendar.name}</span>
+          </div>
+        )}
+
         {/* Description */}
         {event.description && (
           <div className="flex items-start gap-2.5">
@@ -485,6 +601,8 @@ export function EventDetailPopover({
             </p>
           </div>
         )}
+
+        <PluginSlot name="calendar-event-detail" className="w-full" extraProps={pluginProps} />
       </div>
 
       {/* Quick Note */}
@@ -538,7 +656,7 @@ export function EventDetailPopover({
       )}
 
       {/* RSVP Bar (for attendees) */}
-      {rsvpMode && onRsvp && userParticipantId && (
+      {canRsvp && onRsvp && userParticipantId && (
         <div className="px-4 py-3 border-t border-border">
           <p className="text-xs font-medium text-muted-foreground mb-2">
             {t("participants.rsvp_label")}
@@ -587,63 +705,6 @@ export function EventDetailPopover({
         </div>
       )}
 
-      {/* Action Bar */}
-      <div className="px-4 py-2.5 border-t border-border flex items-center gap-1.5">
-        {showDeleteConfirm ? (
-          <div className="flex items-center gap-2 w-full">
-            <span className="text-sm text-destructive flex-1">
-              {t("form.delete_confirm")}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onDelete}
-              className="text-red-600 dark:text-red-400 border-red-300 dark:border-red-700 h-7 text-xs"
-            >
-              {t("events.delete")}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowDeleteConfirm(false)}
-              className="h-7 text-xs"
-            >
-              {t("form.cancel")}
-            </Button>
-          </div>
-        ) : (
-          <>
-            {canEditBody && (
-              <Button variant="default" size="sm" onClick={onEdit} className="h-7 text-xs">
-                <Pencil className="w-3.5 h-3.5 me-1" />
-                {t("events.edit")}
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onDuplicate}
-              className="h-7 text-xs"
-              title={t("events.duplicate")}
-            >
-              <Copy className="w-3.5 h-3.5 me-1" />
-              {t("events.duplicate")}
-            </Button>
-            <div className="flex-1" />
-            {canEditBody && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowDeleteConfirm(true)}
-                className="h-7 text-xs text-red-600 dark:text-red-400"
-                title={t("events.delete")}
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </Button>
-            )}
-          </>
-        )}
-      </div>
     </div>
   );
 

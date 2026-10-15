@@ -1,16 +1,13 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { useRouter } from "@/i18n/navigation";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useTranslations } from "next-intl";
-import { ArrowLeft } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useConfirmDialog } from "@/hooks/use-confirm-dialog";
 import { useAuthStore, redirectToLogin, saveRedirectAfterLogin } from '@/stores/auth-store';
 import { useAccountStore } from "@/stores/account-store";
 import { useEmailStore } from "@/stores/email-store";
-import { useFileStore } from "@/stores/file-store";
+import { useFileStore, resourceServerRef, resourceToView, type UploadResult } from "@/stores/file-store";
 import { toast } from "@/stores/toast-store";
 import { cn, formatFileSize } from "@/lib/utils";
 import { NavigationRail } from "@/components/layout/navigation-rail";
@@ -27,25 +24,31 @@ import type { FileNodeRights } from "@/lib/jmap/types";
 import { ImagePreviewModal } from "@/components/files/image-preview-modal";
 import { FilePreviewModal } from "@/components/files/file-preview-modal";
 import { WopiEditor } from "@/components/files/wopi-editor";
-import { useWopiStatus, fileExtension } from "@/hooks/use-wopi-status";
-import { loadFilesSettings } from "@/components/files/files-settings-dialog";
-import type { FolderLayout } from "@/components/files/files-settings-dialog";
+import { useWopiStatus, canWopiOpen } from "@/hooks/use-wopi-status";
 import { AppTopBannerSlot } from "@/components/plugins/app-top-banner-slot";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "@/components/icons";
 import { isFilePreviewable } from "@/lib/file-preview";
+import { isImageFile } from "@/components/files/file-icons";
 import { appPath, buildFilesPath, parseFilesPath, type FilesDeepLink } from "@/lib/deep-links";
 import { consumePendingDeepLinkEntry, subscribePendingDeepLink } from "@/lib/deep-link-handoff";
 import { useDeepLinkUrl } from "@/hooks/use-deep-link-url";
 import { useProInterfaceActive } from "@/components/pro/pro-interface-redirect";
+import { useLiteLinkSegments } from "@/hooks/use-lite-link-segments";
+import { useDocumentTitle } from "@/hooks/use-document-title";
+import { MvTopBar } from "@/components/layout/mv-top-bar";
+import { useMountainViewShell } from "@/hooks/use-mountain-view-shell";
 
 export interface FilesAppProps {
   /** Path segments after `/files` - the folder path, one segment per level. */
   linkSegments?: string[];
 }
 
-export function FilesApp({ linkSegments }: FilesAppProps = {}) {
-  const router = useRouter();
+export function FilesApp({ linkSegments: routeSegments }: FilesAppProps = {}) {
+  // Static Lite build: the route params are empty, read the link from the URL.
+  const linkSegments = useLiteLinkSegments('files', routeSegments);
   const t = useTranslations("files");
+  const tSidebar = useTranslations("sidebar");
+  useDocumentTitle(tSidebar("files"));
   const tDeepLink = useTranslations("deep_link");
   const filesEnabled = usePolicyStore((s) => s.isFeatureEnabled('filesEnabled'));
   const { isAuthenticated, logout, checkAuth, isLoading: authLoading, client } = useAuthStore();
@@ -84,22 +87,22 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
     createTextFile,
     duplicateResource,
     downloadResources,
-    moveToFolder,
-    moveToParent,
+    moveToFolderId,
     cutResources,
     copyResources,
     pasteResources,
-    selectResource,
     toggleSelect,
-    selectAll,
     clearSelection,
     setSelection,
-    listPath,
-    listByParentId,
     favorites,
     recentFiles,
     toggleFavorite,
     addRecentFile,
+    revealNode,
+    renameNode,
+    deleteNode,
+    downloadNode,
+    removeRecentFile,
     cancelUpload,
     undoLastAction,
     lastAction,
@@ -108,39 +111,21 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
 
   const isMobile = useIsMobile();
   const isEmbedded = useIsEmbedded();
-  const [folderLayout, setFolderLayout] = useState<FolderLayout>(() => loadFilesSettings().folderLayout);
+  // Mountain View's desktop chrome: its top bar in place of the left rail.
+  const mvShell = useMountainViewShell(isEmbedded);
   // The account the files client was last initialised for (`undefined` = never).
   // Tracked so a Pro-shell account switch re-initialises instead of showing the
   // previous account's files until a manual Home click.
   const initedAccountRef = useRef<string | null | undefined>(undefined);
   const filesBootstrapRef = useRef(false);
 
-  // Sync folderLayout when settings change
-  useEffect(() => {
-    const reload = () => setFolderLayout(loadFilesSettings().folderLayout);
-    const handleStorage = (e: StorageEvent) => { if (e.key === "files-settings") reload(); };
-    window.addEventListener("storage", handleStorage);
-    window.addEventListener("files-settings-changed", reload);
-    return () => {
-      window.removeEventListener("storage", handleStorage);
-      window.removeEventListener("files-settings-changed", reload);
-    };
-  }, []);
   const { dialogProps: confirmDialogProps, confirm: confirmDialog } = useConfirmDialog();
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   // WOPI document editing (#425): name of the file open in the editor overlay.
   const [editFile, setEditFile] = useState<string | null>(null);
   const wopiStatus = useWopiStatus(filesEnabled);
-  const isOfficeEditable = useCallback((name: string) => {
-    if (!wopiStatus?.enabled) return false;
-    const ext = fileExtension(name);
-    return wopiStatus.editExtensions.includes(ext) || wopiStatus.viewExtensions.includes(ext);
-  }, [wopiStatus]);
-  const [showDetails, setShowDetails] = useState(false);
-  const [detailName, setDetailName] = useState<string | null>(null);
-
-  const detailResource = detailName ? resources.find(r => r.name === detailName) || null : null;
+  const isOfficeEditable = useCallback((name: string) => canWopiOpen(wopiStatus, name), [wopiStatus]);
 
   // Check auth on mount – skip when already authenticated so that navigating
   // between routes doesn't retrigger checkAuth's transient `{ client: null,
@@ -320,6 +305,14 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
 
   const maxSizeUpload = client?.getMaxSizeUpload() || 0;
 
+  const showUploadResult = useCallback(({ uploaded, canceled }: UploadResult) => {
+    if (canceled) {
+      toast.info(t("upload_canceled"), uploaded > 0 ? t("upload_canceled_partial", { count: uploaded }) : undefined);
+    } else if (uploaded > 0) {
+      toast.success(t("upload_success", { count: uploaded }));
+    }
+  }, [t]);
+
   const handleUploadFiles = useCallback(async (files: File[]) => {
     if (maxSizeUpload > 0) {
       const oversized = files.filter(f => f.size > maxSizeUpload);
@@ -330,13 +323,12 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
     }
     if (files.length === 0) return;
     try {
-      await uploadFiles(files);
-      toast.success(t("upload_success", { count: files.length }));
+      showUploadResult(await uploadFiles(files));
     } catch (err) {
       console.error("Failed to upload files:", err);
       toast.error(t("upload_error"));
     }
-  }, [uploadFiles, t, maxSizeUpload]);
+  }, [uploadFiles, t, maxSizeUpload, showUploadResult]);
 
   const handleUploadFolder = useCallback(async (files: File[]) => {
     if (maxSizeUpload > 0) {
@@ -348,13 +340,12 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
     }
     if (files.length === 0) return;
     try {
-      await uploadFolder(files);
-      toast.success(t("upload_success", { count: files.length }));
+      showUploadResult(await uploadFolder(files));
     } catch (err) {
       console.error("Failed to upload folder:", err);
       toast.error(t("upload_error"));
     }
-  }, [uploadFolder, t, maxSizeUpload]);
+  }, [uploadFolder, t, maxSizeUpload, showUploadResult]);
 
   const handleDelete = useCallback(async (name: string) => {
     const confirmed = await confirmDialog({
@@ -366,7 +357,7 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
     if (!confirmed) return;
 
     try {
-      await deleteResource(name);
+      if (!await deleteResource(name)) return;
       toast.success(t("delete_success"));
     } catch (err) {
       console.error("Failed to delete:", err);
@@ -384,7 +375,7 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
     if (!confirmed) return;
 
     try {
-      await deleteResources(names);
+      if (!await deleteResources(names)) return;
       toast.success(t("batch_delete_success", { count: names.length }));
     } catch (err) {
       console.error("Failed to batch delete:", err);
@@ -404,7 +395,7 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
 
   const handleRename = useCallback(async (oldName: string, newName: string) => {
     try {
-      await renameResource(oldName, newName);
+      if (!await renameResource(oldName, newName)) return;
       toast.success(t("rename_success"), {
         action: { label: t("undo"), onClick: handleUndo },
       });
@@ -458,9 +449,9 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
     }
   }, [duplicateResource, t]);
 
-  const handleMoveToFolder = useCallback(async (names: string[], targetFolder: string) => {
+  const handleMoveTo = useCallback(async (names: string[], targetId: string | null) => {
     try {
-      await moveToFolder(names, targetFolder);
+      if (!await moveToFolderId(names, targetId)) return;
       toast.success(t("move_success", { count: names.length }), {
         action: { label: t("undo"), onClick: handleUndo },
       });
@@ -468,23 +459,11 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
       console.error("Failed to move:", err);
       toast.error(t("move_error"));
     }
-  }, [moveToFolder, t, handleUndo]);
-
-  const handleMoveToParent = useCallback(async (names: string[]) => {
-    try {
-      await moveToParent(names);
-      toast.success(t("move_success", { count: names.length }), {
-        action: { label: t("undo"), onClick: handleUndo },
-      });
-    } catch (err) {
-      console.error("Failed to move:", err);
-      toast.error(t("move_error"));
-    }
-  }, [moveToParent, t, handleUndo]);
+  }, [moveToFolderId, t, handleUndo]);
 
   const handlePaste = useCallback(async () => {
     try {
-      await pasteResources();
+      if (!await pasteResources()) return;
       toast.success(t("paste_success"), {
         action: lastAction ? { label: t("undo"), onClick: handleUndo } : undefined,
       });
@@ -504,10 +483,60 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
     addRecentFile(name, findResourceId(name));
   }, [addRecentFile, findResourceId]);
 
-  const handleShowDetails = useCallback((name: string) => {
-    setDetailName(name);
-    setShowDetails(true);
-  }, []);
+  const handleRenameNode = useCallback(async (id: string, newName: string) => {
+    try {
+      if (!await renameNode(id, newName)) return;
+      toast.success(t("rename_success"), {
+        action: { label: t("undo"), onClick: handleUndo },
+      });
+    } catch (err) {
+      console.error("Failed to rename:", err);
+      toast.error(t("rename_error"));
+    }
+  }, [renameNode, t, handleUndo]);
+
+  const handleDeleteNode = useCallback(async (id: string, name: string) => {
+    const confirmed = await confirmDialog({
+      title: t("delete_confirm_title"),
+      message: t("delete_confirm_message", { name }),
+      confirmText: t("delete"),
+      variant: "destructive",
+    });
+    if (!confirmed) return;
+    try {
+      if (!await deleteNode(id)) return;
+      toast.success(t("delete_success"));
+    } catch (err) {
+      console.error("Failed to delete:", err);
+      toast.error(t("delete_error"));
+    }
+  }, [deleteNode, confirmDialog, t]);
+
+  const handleDownloadNode = useCallback(async (id: string) => {
+    try {
+      await downloadNode(id);
+    } catch (err) {
+      console.error("Failed to download:", err);
+      toast.error(t("download_error"));
+    }
+  }, [downloadNode, t]);
+
+  const handleRevealNode = useCallback(async (id: string) => {
+    if (!await revealNode(id)) toast.error(tDeepLink("file_not_found"));
+  }, [revealNode, tDeepLink]);
+
+  // Recent files can live in any folder: open that folder, then the file.
+  const handleOpenRecent = useCallback(async (id: string) => {
+    const name = await revealNode(id);
+    if (!name) {
+      toast.error(tDeepLink("file_not_found"));
+      return;
+    }
+    addRecentFile(name, id);
+    if (isOfficeEditable(name)) setEditFile(name);
+    else if (isImageFile(name)) setPreviewImage(name);
+    else if (isFilePreviewable(name)) setPreviewFile(name);
+  }, [revealNode, addRecentFile, isOfficeEditable, tDeepLink]);
 
   // The permalink for the folder on screen. In the Pro shell only the focused
   // tab writes the address bar; the standard instance that renders while Pro
@@ -515,15 +544,18 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
   const proInterfaceActive = useProInterfaceActive();
   const isFocusedProTab = useIsFocusedProTab();
   const filesLinkPath = appPath(buildFilesPath(currentPath, previewFile));
+
+  // The previewed file as plugins see it (file-preview-section).
+  const previewedName = previewFile ?? previewImage;
+  const previewedView = useMemo(() => {
+    const resource = previewedName ? resources.find((r) => r.name === previewedName) : undefined;
+    return resource ? resourceToView(resource, currentPath) : null;
+  }, [previewedName, resources, currentPath]);
   useDeepLinkUrl(
     isEmbedded
       ? (isFocusedProTab ? filesLinkPath : null)
       : proInterfaceActive ? null : filesLinkPath,
   );
-
-  const handleToggleDetails = useCallback(() => {
-    setShowDetails(v => !v);
-  }, []);
 
   const currentFilesAccountId = useFileStore((s) => s.currentAccountId);
 
@@ -568,11 +600,20 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
   if (!isAuthenticated) return null;
 
   return (
-    <div className={cn("flex flex-col bg-background overflow-hidden pt-[env(safe-area-inset-top)]", isEmbedded ? "h-full" : "h-dvh")}>
+    <div className={cn("flex flex-col overflow-hidden pt-[env(safe-area-inset-top)]", mvShell ? "bg-[var(--mv-canvas)]" : "bg-background", isEmbedded ? "h-full" : "h-dvh")}>
       <AppTopBannerSlot />
       {refreshIndicator}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-      {!isMobile && !isEmbedded && (
+      {mvShell && (
+        <MvTopBar
+          showMenuButton={false}
+          onManageApps={handleManageApps}
+          onInlineApp={handleInlineApp}
+          onCloseInlineApp={closeInlineApp}
+          activeAppId={inlineApp?.id ?? null}
+        />
+      )}
+      <div data-mv-card={mvShell ? "" : undefined} className={cn("flex flex-1 min-h-0 overflow-hidden", mvShell && "mb-4 mx-4")}>
+      {!isMobile && !isEmbedded && !mvShell && (
         <div className="w-14 bg-secondary flex flex-col flex-shrink-0" style={{ borderRight: '1px solid rgba(128, 128, 128, 0.3)' }}>
           <NavigationRail
             collapsed
@@ -593,22 +634,6 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
         )}
         <div className={cn("flex flex-1 min-h-0", inlineApp && "hidden")}>
           <div className="flex-1 min-w-0 flex flex-col">
-            {folderLayout !== "sidebar" && !isEmbedded && (
-              <div className={cn("p-4 border-b border-border", isMobile && "px-3 py-3")}>
-                <div className="flex items-center justify-between">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => router.push("/")}
-                    className="justify-start"
-                  >
-                    <ArrowLeft className="w-4 h-4 me-2" />
-                    {t("title")}
-                  </Button>
-                </div>
-              </div>
-            )}
-
             <div className="flex-1 min-h-0 flex flex-col">
               {!filesEnabled ? (
                 <div className="flex items-center justify-center h-full">
@@ -623,11 +648,6 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
                   <p className="text-sm text-muted-foreground">{t("not_available")}</p>
                 </div>
               ) : (
-                <div className="flex flex-col flex-1 min-h-0">
-                  <div className="mx-4 mt-3 mb-1 flex items-start gap-2 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2">
-                    <AlertTriangle className="w-4 h-4 text-yellow-500 shrink-0 mt-0.5" />
-                    <p className="text-xs text-yellow-700 dark:text-yellow-400">{t("stability_warning")}</p>
-                  </div>
                 <FileBrowser
                   currentPath={currentPath}
                   resources={resources}
@@ -647,32 +667,29 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
                   onDownload={handleDownload}
                   onBatchDownload={handleBatchDownload}
                   onRefresh={refresh}
-                  onSelectResource={selectResource}
                   onToggleSelect={toggleSelect}
-                  onSelectAll={selectAll}
                   onClearSelection={clearSelection}
                   onSetSelection={setSelection}
                   onCut={cutResources}
                   onCopy={copyResources}
                   onPaste={handlePaste}
-                  onMoveToFolder={handleMoveToFolder}
-                  onMoveToParent={handleMoveToParent}
+                  onMoveTo={handleMoveTo}
                   onPreviewImage={handlePreviewImage}
                   onPreviewFile={handlePreviewFile}
                   isOfficeEditable={isOfficeEditable}
                   onEditFile={setEditFile}
-                  onShowDetails={handleShowDetails}
                   onCreateTextFile={handleCreateTextFile}
                   onDuplicate={handleDuplicate}
                   getImageUrl={getImageUrl}
-                  listPath={listPath}
-                  listByParentId={listByParentId}
                   favorites={favorites}
                   recentFiles={recentFiles}
                   onToggleFavorite={toggleFavorite}
-                  showDetails={showDetails}
-                  onToggleDetails={handleToggleDetails}
-                  detailResource={detailResource}
+                  onOpenRecent={handleOpenRecent}
+                  onRenameNode={handleRenameNode}
+                  onDeleteNode={handleDeleteNode}
+                  onDownloadNode={handleDownloadNode}
+                  onRevealNode={handleRevealNode}
+                  onRemoveRecent={removeRecentFile}
                   accountFolders={accountFolders}
                   onSelectAccount={handleSelectAccount}
                   accountPickerMode={isAccountPicker}
@@ -682,7 +699,6 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
                   sharingEnabled={sharingEnabled}
                   onShare={handleShare}
                 />
-                </div>
               )}
             </div>
           </div>
@@ -706,6 +722,7 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
           onClose={() => setPreviewImage(null)}
           onDownload={handleDownload}
           getImageUrl={getImageUrl}
+          file={previewedView}
         />
       )}
 
@@ -716,23 +733,27 @@ export function FilesApp({ linkSegments }: FilesAppProps = {}) {
           onClose={() => setPreviewFile(null)}
           onDownload={() => handleDownload(previewFile)}
           getFileContent={() => getFileContent(previewFile)}
+          file={previewedView}
         />
       )}
 
       {/* WOPI document editor overlay (#425) */}
       {editFile && (() => {
         const editResource = resources.find(r => r.name === editFile);
-        return editResource ? (
+        if (!editResource) return null;
+        // A file shared with the user lives in the owner's account (#1094).
+        const node = resourceServerRef(editResource);
+        return (
           <WopiEditor
-            resource={editResource}
-            accountId={filesAccountId}
+            target={{ kind: "file", id: node.id, name: editResource.name }}
+            accountId={node.accountId ?? filesAccountId}
             onClose={() => {
               setEditFile(null);
               // The editor may have saved new content - pick up size/mtime.
               refresh();
             }}
           />
-        ) : null;
+        );
       })()}
 
       {/* Legacy file migration progress (issue #379) */}

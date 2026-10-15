@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { IJMAPClient } from '@/lib/jmap/client-interface';
+import type { CalendarEventUpdateOptions, IJMAPClient } from '@/lib/jmap/client-interface';
 import type { Calendar, CalendarEvent, CalendarParticipant, CalendarParticipantIdentity, CalendarRights, CreateCalendarOptions } from '@/lib/jmap/types';
 import { debug } from '@/lib/debug';
 import { normalizeAllDayDuration } from '@/lib/calendar-utils';
@@ -8,19 +8,26 @@ import { displayNow } from '@/lib/timezone';
 import { parseDuration } from '@/components/calendar/event-card';
 import { sanitizeOutgoingCalendarEventData } from '@/lib/calendar-event-normalization';
 import { expandRecurringEvents } from '@/lib/recurrence-expansion';
+import { SchedulingDeniedError } from '@/lib/jmap/scheduling-error';
 import {
   baseEventStoreId,
   buildFallbackExcludePatch,
   buildFallbackOverridePatch,
   buildOccurrencePatch,
+  buildOccurrenceRsvpPatch,
+  isBrowserExpandedOccurrence,
+  withNewOverrideDetails,
   isServerRecurrenceInstance,
   isSyntheticIdMutationUnsupported,
 } from '@/lib/recurrence-instances';
-import { parseISO } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import { generateUUID } from '@/lib/utils';
 import { apiFetch } from '@/lib/browser-navigation';
+import { explainServerAuthError } from '@/lib/server-auth-status';
 import { BIRTHDAY_CALENDAR_ID } from '@/lib/birthday-calendar';
 import { getClientByLocalAccountId } from './client-registry';
+import { calendarHooks } from '@/lib/plugin-hooks';
+import { eventToView } from '@/lib/plugin-projection';
 
 /**
  * When the Pro shell aggregates calendars/events from every connected
@@ -65,10 +72,12 @@ function rawIdentityOf(id: string): string {
  * 'occurrence' they are written through that id - the server turns the patch
  * into a recurrence override - unless they are the single instance of a
  * non-recurring event, where the base event is the same thing and works on
- * every server version. Scope 'series' (an RSVP, a calendar move) always
- * targets the base event. A base event that is not in the store itself but
- * has an expanded occurrence in view (`baseEventStoreId`) borrows that
- * occurrence's account routing.
+ * every server version. Occurrences the browser expanded itself resolve to
+ * their base event and, with scope 'occurrence', are written as a recurrence
+ * override on it. Scope 'series' (an RSVP, a calendar move) always targets
+ * the base event. A base event that is not in the store itself but has an
+ * expanded occurrence in view (`baseEventStoreId`) borrows that occurrence's
+ * account routing.
  */
 interface MutationTarget {
   storeEvent?: CalendarEvent;
@@ -77,6 +86,8 @@ interface MutationTarget {
   localAccountId?: string;
   /** True when `realId` is the synthetic id of one occurrence of a series. */
   isOccurrence: boolean;
+  /** True when `storeEvent` is one occurrence the browser expanded and `realId` its base event. */
+  isBrowserOccurrence?: boolean;
 }
 
 export function resolveMutationTarget(
@@ -98,6 +109,9 @@ export function resolveMutationTarget(
       }
       return { ...context, realId: rawId, isOccurrence: true };
     }
+    if (scope === 'occurrence' && isBrowserExpandedOccurrence(storeEvent)) {
+      return { ...context, realId: rawId, isOccurrence: false, isBrowserOccurrence: true };
+    }
     return { ...context, realId: rawId, isOccurrence: false };
   }
   const instance = events.find(e => baseEventStoreId(e) === id);
@@ -110,6 +124,24 @@ export function resolveMutationTarget(
     };
   }
   return { realId: id, isOccurrence: false };
+}
+
+/**
+ * A server-expanded instance reports `start` in the zone it was expanded in -
+ * the request's zone whenever the event's own start is UTC or floating, as in
+ * a Google Calendar export - not in its base event's zone. Stalwart reads a
+ * written `start` in the base event's zone, so a start worked out from the
+ * instance has to carry the instance's zone along, or the event shifts by the
+ * offset between the two (#1119). All-day starts stay floating.
+ */
+function withInstanceTimeZone(
+  storeEvent: CalendarEvent | undefined,
+  updates: Partial<CalendarEvent>,
+): Partial<CalendarEvent> {
+  if (!storeEvent || !isServerRecurrenceInstance(storeEvent)) return updates;
+  if (updates.start === undefined || updates.timeZone !== undefined) return updates;
+  if (storeEvent.showWithoutTime || updates.showWithoutTime || !storeEvent.timeZone) return updates;
+  return { ...updates, timeZone: storeEvent.timeZone };
 }
 
 /** True when the store shows server-expanded occurrences of base event `baseId` on the given account. */
@@ -130,7 +162,9 @@ const syntheticIdRejected = new WeakSet<object>();
  * Patch one expanded occurrence through its synthetic id. A server that
  * predates synthetic-id writes rejects it; the same change is then written
  * as a recurrence override on the base event instead (the way Bulwark did it
- * before), and that client is remembered as needing the fallback.
+ * before), and that client is remembered as needing the fallback. A change
+ * that creates the override carries the occurrence's details along
+ * (`withNewOverrideDetails`).
  */
 async function updateOccurrence(
   client: IJMAPClient,
@@ -140,10 +174,11 @@ async function updateOccurrence(
   sendSchedulingMessages: boolean | undefined,
   targetAccountId: string | undefined,
 ): Promise<void> {
-  const patch = buildOccurrencePatch(updates);
+  const patch = withNewOverrideDetails(instance, buildOccurrencePatch(updates));
+  const options: CalendarEventUpdateOptions | undefined = patch.sequence != null ? { keepSequence: true } : undefined;
   if (!syntheticIdRejected.has(client)) {
     try {
-      await client.updateCalendarEvent(syntheticId, patch, sendSchedulingMessages, targetAccountId);
+      await client.updateCalendarEvent(syntheticId, patch, sendSchedulingMessages, targetAccountId, options);
       return;
     } catch (error) {
       if (!isSyntheticIdMutationUnsupported(error)) throw error;
@@ -183,6 +218,55 @@ async function destroyOccurrence(
   await client.updateCalendarEvent(instance.baseEventId, fallback, sendSchedulingMessages, targetAccountId);
 }
 
+/**
+ * Answer one occurrence of a series as `participantId`. The server stores it
+ * as a recurrence override and sends the organizer an iTIP REPLY carrying
+ * that occurrence's RECURRENCE-ID.
+ */
+async function rsvpOccurrence(
+  client: IJMAPClient,
+  target: MutationTarget,
+  occurrence: CalendarEvent,
+  participantId: string,
+  status: CalendarParticipant['participationStatus'],
+): Promise<void> {
+  const patch = buildOccurrenceRsvpPatch(occurrence, participantId, status);
+  if (!patch) throw new Error('Participant not found on this occurrence');
+  if (target.isOccurrence) {
+    await updateOccurrence(client, occurrence, target.realId, patch, true, target.targetAccountId);
+    return;
+  }
+  await updateBrowserOccurrence(client, target, patch, true);
+}
+
+/**
+ * Write a change to one occurrence the browser expanded as a recurrence
+ * override on its base event (`target.realId`) - never as a change to the
+ * base event itself, which would move or edit the whole series.
+ */
+async function updateBrowserOccurrence(
+  client: IJMAPClient,
+  target: MutationTarget,
+  updates: Partial<CalendarEvent>,
+  sendSchedulingMessages: boolean | undefined,
+): Promise<void> {
+  const occurrence = target.storeEvent!;
+  const patch = buildFallbackOverridePatch(occurrence, withNewOverrideDetails(occurrence, updates));
+  if (!patch) throw new Error('Cannot resolve the occurrence to override');
+  await client.updateCalendarEvent(target.realId, patch, sendSchedulingMessages, target.targetAccountId);
+}
+
+/** Delete one occurrence the browser expanded by excluding it on its base event. */
+async function destroyBrowserOccurrence(
+  client: IJMAPClient,
+  target: MutationTarget,
+  sendSchedulingMessages: boolean | undefined,
+): Promise<void> {
+  const patch = buildFallbackExcludePatch(target.storeEvent!);
+  if (!patch) throw new Error('Cannot resolve the occurrence to exclude');
+  await client.updateCalendarEvent(target.realId, patch, sendSchedulingMessages, target.targetAccountId);
+}
+
 // Re-runs the most recent range fetch. Synthetic occurrence ids are
 // positional and reshuffle whenever a series' overrides change, so after
 // mutating an occurrence (or a base event with occurrences in view) the
@@ -211,10 +295,15 @@ async function refetchAfterOccurrenceMutation(): Promise<void> {
  * namespaced transition (aggregation switched on, an account switch, or a
  * just-created calendar added with its raw id) changes the id string while the
  * calendar is the same. Remap by raw identity so the selection survives instead
- * of silently resetting to "all". Keeps BIRTHDAY_CALENDAR_ID; drops ids that
- * resolve to no calendar.
+ * of silently resetting to "all". Keeps BIRTHDAY_CALENDAR_ID and ids starting
+ * with one of `unloadedPrefixes` (calendars of an account that failed to load
+ * are unknown, not deleted); drops ids that resolve to no calendar.
  */
-export function reconcileSelectedIds(selectedCalendarIds: string[], calendars: Calendar[]): string[] {
+export function reconcileSelectedIds(
+  selectedCalendarIds: string[],
+  calendars: Calendar[],
+  unloadedPrefixes: string[] = [],
+): string[] {
   const byStoreId = new Set(calendars.map((c) => c.id));
   const rawToStoreId = new Map<string, string>();
   for (const c of calendars) {
@@ -226,6 +315,8 @@ export function reconcileSelectedIds(selectedCalendarIds: string[], calendars: C
   for (const id of selectedCalendarIds) {
     let mapped: string | undefined;
     if (id === BIRTHDAY_CALENDAR_ID || byStoreId.has(id)) mapped = id;
+    // Before the raw remap: another account may hold the same raw id.
+    else if (unloadedPrefixes.some((prefix) => id.startsWith(prefix))) mapped = id;
     else mapped = rawToStoreId.get(rawIdentityOf(id));
     if (mapped && !seen.has(mapped)) {
       out.push(mapped);
@@ -235,10 +326,29 @@ export function reconcileSelectedIds(selectedCalendarIds: string[], calendars: C
   return out;
 }
 
+/**
+ * The selection to keep after a calendars fetch: the reconciled one, or the
+ * default when no real calendar is left in it. The virtual birthday calendar
+ * always survives reconciliation, so it must not count - counting it pinned
+ * the selection to "birthdays only" once the real calendars had dropped out.
+ */
+function selectionAfterFetch(
+  selectedCalendarIds: string[],
+  calendars: Calendar[],
+  defaultSelected: string[],
+  unloadedPrefixes?: string[],
+): string[] {
+  const reconciled = reconcileSelectedIds(selectedCalendarIds, calendars, unloadedPrefixes);
+  if (reconciled.some((id) => id !== BIRTHDAY_CALENDAR_ID)) return reconciled;
+  return reconciled.includes(BIRTHDAY_CALENDAR_ID) ? [...defaultSelected, BIRTHDAY_CALENDAR_ID] : defaultSelected;
+}
+
 // In-flight refresh dedup. Concurrent callers (auto-interval +
 // manual refresh, two account-switch reloads, etc.) share the same
 // promise instead of double-fetching and racing the diff/import phase.
 const refreshInFlight = new Map<string, Promise<void>>();
+// Subscriptions whose first fetch is running inside addICalSubscription.
+const subscriptionsBeingAdded = new Set<string>();
 
 export type CalendarViewMode = 'month' | 'week' | 'day' | 'agenda' | 'tasks';
 
@@ -384,6 +494,39 @@ function getStoreEventDebugSnapshot(event: Partial<CalendarEvent> | null | undef
   };
 }
 
+/** Identifies the login a subscription belongs to: server plus login name. */
+export function subscriptionOwner(client: Pick<IJMAPClient, 'getServerUrl' | 'getUsername'>): string {
+  return `${client.getServerUrl().replace(/\/+$/, '').toLowerCase()}|${client.getUsername().toLowerCase()}`;
+}
+
+type CalendarStoreSet = (partial: Partial<CalendarStore> | ((state: CalendarStore) => Partial<CalendarStore>)) => void;
+
+/**
+ * Whether `client` may act on `sub`: refresh it (a destructive diff of the
+ * calendar's events), rename or delete its calendar. A subscription owned
+ * by this login may. One with another owner may not. One without an owner
+ * (created before owners were recorded) is adopted only when its calendar
+ * id and name both exist in this account - a bare id match would name an
+ * unrelated calendar in another account or on another server.
+ */
+async function claimSubscription(client: IJMAPClient, sub: ICalSubscription, set: CalendarStoreSet): Promise<boolean> {
+  const owner = subscriptionOwner(client);
+  if (sub.owner) return sub.owner === owner;
+  if (sub.accountId && sub.accountId !== client.getAccountId()) return false;
+  let calendars: Calendar[];
+  try {
+    calendars = await client.getCalendars();
+  } catch {
+    return false;
+  }
+  const found = calendars.some((c) => (c.originalId ?? c.id) === sub.calendarId && c.name === sub.name);
+  if (!found) return false;
+  set((state) => ({
+    icalSubscriptions: state.icalSubscriptions.map((s) => (s.id === sub.id ? { ...s, owner } : s)),
+  }));
+  return true;
+}
+
 export interface ICalSubscription {
   id: string;
   url: string;
@@ -393,6 +536,14 @@ export interface ICalSubscription {
   // legacy entries with no accountId are shown only in whichever account
   // the user has active (treated as floating). New subs always set it.
   accountId?: string;
+  /**
+   * The login that owns the subscription (subscriptionOwner()). A JMAP
+   * account id alone is not unique - two servers hand out the same small
+   * ids - so a subscription is only refreshed or removed through the login
+   * it was created with. Missing on subscriptions created before this was
+   * recorded; those are adopted once their calendar is found in the account.
+   */
+  owner?: string;
   name: string;
   color: string;
   refreshInterval: number; // minutes
@@ -439,10 +590,10 @@ interface CalendarStore {
   fetchAllAccountsCalendars: (accounts: CalendarAccountClient[]) => Promise<void>;
   fetchAllAccountsEvents: (accounts: CalendarAccountClient[], start: string, end: string, options?: FetchEventsOptions) => Promise<void>;
   createEvent: (client: IJMAPClient, event: Partial<CalendarEvent>, sendSchedulingMessages?: boolean) => Promise<CalendarEvent | null>;
-  updateEvent: (client: IJMAPClient, id: string, updates: Partial<CalendarEvent>, sendSchedulingMessages?: boolean) => Promise<void>;
-  deleteEvent: (client: IJMAPClient, id: string, sendSchedulingMessages?: boolean) => Promise<void>;
-  rsvpEvent: (client: IJMAPClient, eventId: string, participantId: string, status: string, replyTo?: Record<string, string> | null) => Promise<void>;
-  importEvents: (client: IJMAPClient, events: Partial<CalendarEvent>[], calendarId: string) => Promise<number>;
+  updateEvent: (client: IJMAPClient, id: string, updates: Partial<CalendarEvent>, sendSchedulingMessages?: boolean) => Promise<boolean>;
+  deleteEvent: (client: IJMAPClient, id: string, sendSchedulingMessages?: boolean) => Promise<boolean>;
+  rsvpEvent: (client: IJMAPClient, eventId: string, participantId: string, status: string, replyTo?: Record<string, string> | null, scope?: 'occurrence' | 'series') => Promise<boolean>;
+  importEvents: (client: IJMAPClient, events: Partial<CalendarEvent>[], calendarId: string) => Promise<number | null>;
   updateCalendar: (client: IJMAPClient, calendarId: string, updates: Partial<Calendar>) => Promise<void>;
   setDefaultCalendar: (client: IJMAPClient, calendarId: string) => Promise<void>;
   shareCalendar: (client: IJMAPClient, calendarId: string, principalId: string, rights: CalendarRights | null) => Promise<void>;
@@ -461,6 +612,10 @@ interface CalendarStore {
   updateICalSubscription: (client: IJMAPClient, subscriptionId: string, updates: { url?: string; name?: string; color?: string; refreshInterval?: number }) => Promise<void>;
   removeICalSubscription: (client: IJMAPClient, subscriptionId: string) => Promise<void>;
   refreshICalSubscription: (client: IJMAPClient, subscriptionId: string) => Promise<void>;
+  /** Drop every subscription of a signed-out login (its feed URLs are secrets). */
+  forgetICalSubscriptions: (owner: string) => void;
+  /** Drop all subscriptions, e.g. once nobody is signed in any more. */
+  clearICalSubscriptions: () => void;
   refreshAllSubscriptions: (client: IJMAPClient) => Promise<void>;
   isSubscriptionCalendar: (calendarId: string) => boolean;
 }
@@ -517,16 +672,22 @@ export const useCalendarStore = create<CalendarStore>()(
         // alongside without blocking the grid.
         void get().fetchParticipantIdentities(client);
         try {
-          const calendars = await client.getAllCalendars();
-          const { selectedCalendarIds } = get();
-          const stillValid = reconcileSelectedIds(selectedCalendarIds, calendars);
+          // Throws when the primary account fails, so a failed fetch leaves the
+          // list and the selection as they were.
+          const { calendars, failedAccountIds } = await client.getAllCalendarsWithFailures();
           // Default the visible selection to event calendars only - tasks-only
           // calendars stay out of the event grid.
           const defaultSelected = calendars.filter(c => !c.isTasksOnly).map(c => c.id);
           set({
             calendars,
             isLoading: false,
-            selectedCalendarIds: stillValid.length > 0 ? stillValid : defaultSelected,
+            selectedCalendarIds: selectionAfterFetch(
+              get().selectedCalendarIds,
+              calendars,
+              defaultSelected,
+              // Shared calendars' ids are `<accountId>:<id>` (getAllCalendars).
+              failedAccountIds.map((accountId) => `${accountId}:`),
+            ),
           });
         } catch (error) {
           debug.error('Failed to fetch calendars:', error);
@@ -575,24 +736,32 @@ export const useCalendarStore = create<CalendarStore>()(
       fetchAllAccountsCalendars: async (accounts) => {
         set({ isLoading: true, error: null });
         try {
+          // Id prefixes of the calendars that could not be loaded this time.
+          const unloadedPrefixes: string[] = [];
           const results = await Promise.all(
             accounts.map(async ({ client, localAccountId }) => {
+              const prefix = buildCrossAccountIdPrefix(localAccountId);
               try {
-                const list = await client.getAllCalendars();
+                const { calendars: list, failedAccountIds } = await client.getAllCalendarsWithFailures();
+                unloadedPrefixes.push(...failedAccountIds.map((accountId) => `${prefix}${accountId}:`));
                 return prefixCalendarsWithLocalAccount(list, localAccountId);
               } catch (error) {
                 debug.error(`Failed to fetch calendars for account ${localAccountId}:`, error);
+                unloadedPrefixes.push(prefix);
                 return [] as Calendar[];
               }
             }),
           );
           const calendars = results.flat();
-          const { selectedCalendarIds } = get();
-          const stillValid = reconcileSelectedIds(selectedCalendarIds, calendars);
           set({
             calendars,
             isLoading: false,
-            selectedCalendarIds: stillValid.length > 0 ? stillValid : calendars.map(c => c.id),
+            selectedCalendarIds: selectionAfterFetch(
+              get().selectedCalendarIds,
+              calendars,
+              calendars.map(c => c.id),
+              unloadedPrefixes,
+            ),
           });
         } catch (error) {
           debug.error('Failed to fetch all-account calendars:', error);
@@ -627,6 +796,9 @@ export const useCalendarStore = create<CalendarStore>()(
       },
 
       createEvent: async (client, event, sendSchedulingMessages) => {
+        if (!(await calendarHooks.onBeforeEventCreate.intercept(eventToView({ id: '', ...event } as CalendarEvent)))) {
+          return null;
+        }
         set({ error: null });
         try {
           // Resolve shared calendar context from calendarIds. Also pin the
@@ -704,6 +876,7 @@ export const useCalendarStore = create<CalendarStore>()(
           }
 
           set((state) => ({ events: [...state.events, mappedCreated] }));
+          void calendarHooks.onAfterEventCreate.emit(eventToView(mappedCreated));
           // Invitation emails are sent by the server: `sendSchedulingMessages`
           // on CalendarEvent/set makes Stalwart queue the iTIP REQUEST itself.
           // Sending a client-side iMIP copy here produced duplicate emails.
@@ -711,11 +884,14 @@ export const useCalendarStore = create<CalendarStore>()(
         } catch (error) {
           debug.error('Failed to create event:', error);
           set({ error: 'Failed to create event' });
+          // The caller can offer to save it without the invitations.
+          if (error instanceof SchedulingDeniedError) throw error;
           return null;
         }
       },
 
-      updateEvent: async (client, id, updates, sendSchedulingMessages) => {
+      updateEvent: async (client, id, updates, sendSchedulingMessages): Promise<boolean> => {
+        if (!(await calendarHooks.onBeforeEventUpdate.intercept({ eventId: id, patch: updates }))) return false;
         set({ error: null });
         try {
           // Resolve shared event IDs and client-side expanded occurrence IDs
@@ -732,7 +908,7 @@ export const useCalendarStore = create<CalendarStore>()(
             updateKeys: Object.keys(updates),
           });
           // Remap namespaced calendarIds back to original IDs
-          const cleanUpdates = sanitizeOutgoingCalendarEventData({ ...updates });
+          const cleanUpdates = sanitizeOutgoingCalendarEventData(withInstanceTimeZone(storeEvent, { ...updates }));
           if (cleanUpdates.calendarIds) {
             const remapped: Record<string, boolean> = {};
             for (const [calId, v] of Object.entries(cleanUpdates.calendarIds)) {
@@ -743,9 +919,14 @@ export const useCalendarStore = create<CalendarStore>()(
           }
           if (target.isOccurrence && storeEvent) {
             await updateOccurrence(client, storeEvent, realId, cleanUpdates, sendSchedulingMessages, targetAccountId);
+          } else if (target.isBrowserOccurrence) {
+            await updateBrowserOccurrence(client, target, cleanUpdates, sendSchedulingMessages);
           } else {
             await client.updateCalendarEvent(realId, cleanUpdates, sendSchedulingMessages, targetAccountId);
           }
+          // The event as it is after the change, before a refetch reshuffles
+          // occurrence ids: for a single-occurrence edit this is that occurrence.
+          let updatedEvent: CalendarEvent | undefined;
           set((state) => ({
             events: state.events.map(e => {
               if (e.id !== id) return e;
@@ -771,10 +952,15 @@ export const useCalendarStore = create<CalendarStore>()(
                   new Date(merged.utcStart).getTime() + durationMinutes * 60000,
                 ).toISOString();
               }
+              updatedEvent = merged;
               return merged;
             }),
           }));
-          if (target.isOccurrence || hasExpandedOccurrencesOf(get().events, realId, target)) {
+          if (calendarHooks.onAfterEventUpdate.size > 0) {
+            const after = updatedEvent ?? ({ ...(storeEvent ?? {}), ...updates, id } as CalendarEvent);
+            void calendarHooks.onAfterEventUpdate.emit(eventToView(after));
+          }
+          if (target.isOccurrence || target.isBrowserOccurrence || hasExpandedOccurrencesOf(get().events, realId, target)) {
             await refetchAfterOccurrenceMutation();
           }
           // Update emails (iTIP REQUEST/REPLY) are sent by the server via the
@@ -785,9 +971,10 @@ export const useCalendarStore = create<CalendarStore>()(
           set({ error: 'Failed to update event' });
           throw error;
         }
+        return true;
       },
 
-      rsvpEvent: async (client, eventId, participantId, status, replyTo) => {
+      rsvpEvent: async (client, eventId, participantId, status, replyTo, scope = 'series'): Promise<boolean> => {
         set({ error: null });
         // JMAP participant IDs are opaque strings - they can contain @, ., :,
         // / etc. The id is RFC 6901-escaped below before being embedded in the
@@ -796,31 +983,41 @@ export const useCalendarStore = create<CalendarStore>()(
           set({ error: 'Invalid participant ID' });
           throw new Error('Invalid participant ID');
         }
+        if (!(await calendarHooks.onBeforeEventRsvp.intercept({ eventId, status }))) return false;
         try {
-          // Resolve shared event IDs and client-side expanded occurrence IDs
-          // An RSVP answers for the whole series, so an expanded occurrence
-          // is resolved to its base event here.
-          const { storeEvent, realId, targetAccountId, localAccountId } =
-            resolveMutationTarget(get().events, eventId, 'series');
+          // Resolve shared event IDs and client-side expanded occurrence IDs.
+          // Scope 'series' answers for the whole series, so an expanded
+          // occurrence is resolved to its base event here; scope 'occurrence'
+          // answers for that one occurrence only.
+          const target = resolveMutationTarget(get().events, eventId, scope);
+          const { storeEvent, realId, targetAccountId, localAccountId } = target;
           client = resolveAccountClient(client, localAccountId);
-          // Escape per RFC 6901 (JSON Pointer): ~ → ~0, / → ~1
-          const escapedId = participantId.replace(/~/g, '~0').replace(/\//g, '~1');
-          const patchKey = `participants/${escapedId}/participationStatus`;
-          const patch: Record<string, unknown> = { [patchKey]: status };
-          // Stalwart routes the iTIP REPLY to the stored ORGANIZER
-          // (organizerCalendarAddress); the RFC 8984 replyTo property is retired
-          // in jscalendarbis and ignored. Repair events that are missing the
-          // organizer (e.g. imported ones), but never touch an existing one -
-          // attendees may not modify the ORGANIZER.
-          if (replyTo?.imip && storeEvent && !storeEvent.organizerCalendarAddress) {
-            patch.organizerCalendarAddress = replyTo.imip;
+          const occurrence = target.isOccurrence || target.isBrowserOccurrence ? storeEvent ?? null : null;
+          if (occurrence) {
+            await rsvpOccurrence(
+              client, target, occurrence, participantId,
+              status as CalendarParticipant['participationStatus'],
+            );
+          } else {
+            // Escape per RFC 6901 (JSON Pointer): ~ → ~0, / → ~1
+            const escapedId = participantId.replace(/~/g, '~0').replace(/\//g, '~1');
+            const patchKey = `participants/${escapedId}/participationStatus`;
+            const patch: Record<string, unknown> = { [patchKey]: status };
+            // Stalwart routes the iTIP REPLY to the stored ORGANIZER
+            // (organizerCalendarAddress); the RFC 8984 replyTo property is retired
+            // in jscalendarbis and ignored. Repair events that are missing the
+            // organizer (e.g. imported ones), but never touch an existing one -
+            // attendees may not modify the ORGANIZER.
+            if (replyTo?.imip && storeEvent && !storeEvent.organizerCalendarAddress) {
+              patch.organizerCalendarAddress = replyTo.imip;
+            }
+            await client.updateCalendarEvent(
+              realId,
+              patch as unknown as Partial<CalendarEvent>,
+              true,
+              targetAccountId
+            );
           }
-          await client.updateCalendarEvent(
-            realId,
-            patch as unknown as Partial<CalendarEvent>,
-            true,
-            targetAccountId
-          );
           set((state) => ({
             events: state.events.map(e => {
               if (e.id !== eventId || !e.participants?.[participantId]) return e;
@@ -833,202 +1030,31 @@ export const useCalendarStore = create<CalendarStore>()(
               };
             }),
           }));
+          void calendarHooks.onEventRsvp.emit({ eventId, status });
+          // Only the answered event was updated above: after a series answer
+          // the other occurrences in view still show the old status, after an
+          // occurrence answer the synthetic ids / overrides are stale.
+          if (occurrence || storeEvent?.recurrenceId || hasExpandedOccurrencesOf(get().events, realId, target)) {
+            await refetchAfterOccurrenceMutation();
+          }
         } catch (error) {
           debug.error('Failed to RSVP:', error);
           set({ error: 'Failed to update RSVP' });
           throw error;
         }
+        return true;
       },
 
       importEvents: async (client, events, calendarId) => {
-        // Resolve shared calendar IDs
-        const cal = get().calendars.find(c => c.id === calendarId);
-        const realCalendarId = cal?.originalId || stripLocalAccountPrefix(calendarId, cal?.localAccountId);
-        const targetAccountId = cal?.accountId;
-        client = resolveAccountClient(client, cal?.localAccountId);
-
-        // Drop within-file UID duplicates first (first occurrence wins).
-        // CalendarEvent/parse already merges master + RECURRENCE-ID overrides
-        // into one object, so anything still sharing a UID here is a corrupt
-        // feed - creating both either fails ("UID already exists") or stores
-        // two events under one UID, depending on the Stalwart version.
-        const seenUids = new Set<string>();
-        let eventsToProcess = events.filter((e) => {
-          if (!e.uid) return true;
-          if (seenUids.has(e.uid)) return false;
-          seenUids.add(e.uid);
-          return true;
-        });
-
-        // Deduplicate UIDs: Stalwart enforces UID uniqueness across all calendars.
-        // - Events already in the target calendar → skip (true duplicates)
-        // - Events in other calendars → link to target calendar via calendarIds update
-        // - New events → create as normal
-        let linked = 0;
-        try {
-          const allServerEvents = await client.getCalendarEvents(undefined, targetAccountId);
-          const uidToEvent = new Map<string, { id: string; calendarIds: Record<string, boolean> }>();
-          for (const e of allServerEvents) {
-            if (e.uid) {
-              uidToEvent.set(e.uid, {
-                id: (e as CalendarEvent).originalId || e.id,
-                calendarIds: (e as CalendarEvent).originalCalendarIds || e.calendarIds || {},
-              });
-            }
-          }
-
-          const newEvents: Partial<CalendarEvent>[] = [];
-          const eventsToLink: { eventId: string; calendarIds: Record<string, boolean> }[] = [];
-
-          for (const e of eventsToProcess) {
-            if (!e.uid || !uidToEvent.has(e.uid)) {
-              // UID doesn't exist on server - create it
-              newEvents.push(e);
-            } else {
-              const existing = uidToEvent.get(e.uid)!;
-              if (existing.calendarIds[realCalendarId]) {
-                // Already in target calendar - skip
-                continue;
-              }
-              // Exists in another calendar - link to target calendar
-              eventsToLink.push({
-                eventId: existing.id,
-                calendarIds: { ...existing.calendarIds, [realCalendarId]: true },
-              });
-            }
-          }
-
-          // Batch-link existing events to the target calendar
-          for (const { eventId, calendarIds } of eventsToLink) {
-            try {
-              await client.updateCalendarEvent(eventId, { calendarIds } as Partial<CalendarEvent>, undefined, targetAccountId);
-              linked++;
-            } catch (err) {
-              debug.warn('calendar', `Import: failed to link event ${eventId} to target calendar:`, err);
-            }
-          }
-
-          if (linked > 0) {
-            debug.log('calendar', `Import: linked ${linked} existing events to target calendar`);
-          }
-          const skipped = eventsToProcess.length - newEvents.length - eventsToLink.length;
-          if (skipped > 0) {
-            debug.log('calendar', `Import: skipped ${skipped} events already in target calendar`);
-          }
-          eventsToProcess = newEvents;
-        } catch (error) {
-          debug.warn('calendar', 'Could not fetch existing events for deduplication, proceeding without:', error);
-        }
-
-        // Prepare all events for batch creation
-        const prepared: Partial<CalendarEvent>[] = [];
-        for (const event of eventsToProcess) {
-          const src = sanitizeOutgoingCalendarEventData(event as Partial<CalendarEvent>);
-          let cleanParticipants: Record<string, CalendarParticipant> | null = null;
-          if (src.participants) {
-            cleanParticipants = {};
-            for (const [key, p] of Object.entries(src.participants)) {
-              const participant: Record<string, unknown> = {
-                '@type': 'Participant',
-                name: p.name,
-                email: p.email,
-                // calendarAddress carries the scheduling address in jscalendarbis
-                // (Stalwart); sendTo is retired there, so it only serves as a
-                // fallback source for events parsed from legacy RFC 8984 data.
-                calendarAddress: p.calendarAddress || p.sendTo?.imip,
-                description: p.description,
-                kind: p.kind,
-                roles: p.roles,
-                participationStatus: p.participationStatus,
-                participationComment: p.participationComment,
-                expectReply: p.expectReply,
-                scheduleAgent: p.scheduleAgent,
-                scheduleForceSend: p.scheduleForceSend,
-                scheduleId: p.scheduleId,
-                delegatedTo: p.delegatedTo,
-                delegatedFrom: p.delegatedFrom,
-                memberOf: p.memberOf,
-                locationId: p.locationId,
-                language: p.language,
-                links: p.links,
-              };
-              Object.keys(participant).forEach(k => {
-                if (participant[k] === undefined || participant[k] === null) delete participant[k];
-              });
-              cleanParticipants[key] = participant as unknown as CalendarParticipant;
-            }
-          }
-
-          const data: Partial<CalendarEvent> = {
-            calendarIds: { [realCalendarId]: true },
-            uid: src.uid,
-            title: src.title,
-            description: src.description,
-            descriptionContentType: src.descriptionContentType,
-            start: src.start,
-            duration: src.showWithoutTime ? normalizeAllDayDuration(src.duration) : src.duration,
-            timeZone: src.showWithoutTime ? null : src.timeZone,
-            showWithoutTime: src.showWithoutTime,
-            status: src.status,
-            freeBusyStatus: src.freeBusyStatus,
-            privacy: src.privacy,
-            color: src.color,
-            keywords: src.keywords,
-            categories: src.categories,
-            locale: src.locale,
-            // Stalwart derives the iCalendar ORGANIZER solely from
-            // organizerCalendarAddress (replyTo is retired in jscalendarbis);
-            // dropping it here would strip the ORGANIZER from imported invites
-            // and break RSVP replies afterwards.
-            organizerCalendarAddress: src.organizerCalendarAddress || src.replyTo?.imip,
-            locations: src.locations,
-            virtualLocations: src.virtualLocations,
-            links: src.links,
-            recurrenceRules: src.recurrenceRules,
-            recurrenceOverrides: src.recurrenceOverrides,
-            excludedRecurrenceRules: src.excludedRecurrenceRules,
-            alerts: src.alerts,
-            participants: cleanParticipants,
-          };
-          Object.keys(data).forEach(k => {
-            const v = (data as Record<string, unknown>)[k];
-            if (v === undefined || v === null) delete (data as Record<string, unknown>)[k];
-          });
-          prepared.push(data);
-        }
-
-        if (prepared.length === 0) return linked;
-
-        // Batch create in chunks of 50 to avoid oversized requests
-        const BATCH_SIZE = 50;
-        let imported = 0;
-        for (let i = 0; i < prepared.length; i += BATCH_SIZE) {
-          const batch = prepared.slice(i, i + BATCH_SIZE);
-          try {
-            const { created, failed, notCreated } = await client.batchCreateCalendarEvents(batch, targetAccountId);
-            imported += created.length;
-            if (failed.length > 0) {
-              const first = Object.values(notCreated)[0];
-              const reason = first?.description || first?.type || 'unknown error';
-              debug.warn('calendar', `Import batch ${i / BATCH_SIZE + 1}: ${failed.length} events failed (${reason})`);
-              set({ error: `${failed.length} event(s) could not be imported: ${reason}` });
-            }
-          } catch (error) {
-            debug.error(`Import batch ${i / BATCH_SIZE + 1} failed:`, error);
-          }
-        }
-
-        // Re-fetch all events properly so the store state is consistent
-        // (with recurrence expansion, multi-account mapping, etc.)
-        const { dateRange } = get();
-        if (dateRange) {
-          await get().fetchEvents(client, dateRange.start, dateRange.end);
-        }
-
-        return imported + linked;
+        if (!(await calendarHooks.onBeforeEventsImport.intercept({ calendarId, count: events.length }))) return null;
+        const imported = await importEventsUnhooked(client, events, calendarId);
+        void calendarHooks.onEventsImport.emit({ calendarId, imported, skipped: Math.max(0, events.length - imported) });
+        return imported;
       },
 
-      deleteEvent: async (client, id, sendSchedulingMessages) => {
+      deleteEvent: async (client, id, sendSchedulingMessages): Promise<boolean> => {
+        const title = get().events.find((e) => e.id === id)?.title || '';
+        if (!(await calendarHooks.onBeforeEventDelete.intercept({ eventId: id, title }))) return false;
         set({ error: null });
         try {
           // Resolve shared event IDs and client-side expanded occurrence IDs
@@ -1047,6 +1073,9 @@ export const useCalendarStore = create<CalendarStore>()(
           });
           if (target.isOccurrence && storeEvent) {
             await destroyOccurrence(client, storeEvent, realId, sendSchedulingMessages, targetAccountId);
+          } else if (target.isBrowserOccurrence) {
+            // `realId` is the base event: destroying it would delete the series.
+            await destroyBrowserOccurrence(client, target, sendSchedulingMessages);
           } else {
             await client.deleteCalendarEvent(realId, sendSchedulingMessages, targetAccountId);
           }
@@ -1055,7 +1084,8 @@ export const useCalendarStore = create<CalendarStore>()(
             events: state.events.filter(e => e.id !== id),
             selectedEventId: state.selectedEventId === id ? null : state.selectedEventId,
           }));
-          if (target.isOccurrence || hadOccurrences) {
+          void calendarHooks.onAfterEventDelete.emit({ eventId: id, title });
+          if (target.isOccurrence || target.isBrowserOccurrence || hadOccurrences) {
             await refetchAfterOccurrenceMutation();
           }
         } catch (error) {
@@ -1063,10 +1093,25 @@ export const useCalendarStore = create<CalendarStore>()(
           set({ error: 'Failed to delete event' });
           throw error;
         }
+        return true;
       },
 
-      setSelectedDate: (date) => set({ selectedDate: date }),
-      setViewMode: (mode) => set({ viewMode: getSafeCalendarViewMode(mode) }),
+      setSelectedDate: (date) => {
+        // Plugins get the shown day; a new time on the same day is no change.
+        const previous = get().selectedDate;
+        set({ selectedDate: date });
+        if (Number.isNaN(date.getTime())) return;
+        const day = format(date, 'yyyy-MM-dd');
+        if (Number.isNaN(previous.getTime()) || format(previous, 'yyyy-MM-dd') !== day) {
+          void calendarHooks.onCalendarDateChange.emit({ date: day });
+        }
+      },
+      setViewMode: (mode) => {
+        const view = getSafeCalendarViewMode(mode);
+        const previous = get().viewMode;
+        set({ viewMode: view });
+        if (previous !== view) void calendarHooks.onCalendarViewChange.emit({ view });
+      },
 
       updateCalendar: async (client, calendarId, updates) => {
         set({ error: null });
@@ -1081,6 +1126,7 @@ export const useCalendarStore = create<CalendarStore>()(
               c.id === calendarId ? { ...c, ...updates } : c
             ),
           }));
+          void calendarHooks.onCalendarChange.emit({ calendarId, change: 'updated' });
         } catch (error) {
           debug.error('Failed to update calendar:', error);
           set({ error: 'Failed to update calendar' });
@@ -1111,6 +1157,7 @@ export const useCalendarStore = create<CalendarStore>()(
               return c;
             }),
           }));
+          void calendarHooks.onCalendarChange.emit({ calendarId, change: 'updated' });
         } catch (error) {
           debug.error('Failed to set default calendar:', error);
           set({ error: 'Failed to set default calendar' });
@@ -1135,6 +1182,7 @@ export const useCalendarStore = create<CalendarStore>()(
               return { ...c, shareWith: next };
             }),
           }));
+          void calendarHooks.onCalendarChange.emit({ calendarId, change: 'updated' });
         } catch (error) {
           debug.error('Failed to share calendar:', error);
           set({ error: 'Failed to share calendar' });
@@ -1152,6 +1200,7 @@ export const useCalendarStore = create<CalendarStore>()(
             calendars: [...state.calendars, created],
             selectedCalendarIds: [...state.selectedCalendarIds, created.id],
           }));
+          void calendarHooks.onCalendarChange.emit({ calendarId: created.id, change: 'created' });
           return created;
         } catch (error) {
           debug.error('Failed to create calendar:', error);
@@ -1173,6 +1222,7 @@ export const useCalendarStore = create<CalendarStore>()(
             selectedCalendarIds: state.selectedCalendarIds.filter(id => id !== calendarId),
             events: state.events.filter(e => !e.calendarIds?.[calendarId]),
           }));
+          void calendarHooks.onCalendarChange.emit({ calendarId, change: 'removed' });
         } catch (error) {
           debug.error('Failed to delete calendar:', error);
           set({ error: 'Failed to delete calendar' });
@@ -1260,14 +1310,15 @@ export const useCalendarStore = create<CalendarStore>()(
         }
       },
 
-      toggleCalendarVisibility: (calendarId) => set((state) => {
-        const ids = state.selectedCalendarIds;
-        return {
-          selectedCalendarIds: ids.includes(calendarId)
-            ? ids.filter(id => id !== calendarId)
-            : [...ids, calendarId],
-        };
-      }),
+      toggleCalendarVisibility: (calendarId) => {
+        const visible = !get().selectedCalendarIds.includes(calendarId);
+        set((state) => ({
+          selectedCalendarIds: visible
+            ? [...state.selectedCalendarIds, calendarId]
+            : state.selectedCalendarIds.filter(id => id !== calendarId),
+        }));
+        void calendarHooks.onCalendarVisibilityToggle.emit({ calendarId, visible });
+      },
 
       setSelectedEventId: (id) => set({ selectedEventId: id }),
 
@@ -1309,6 +1360,7 @@ export const useCalendarStore = create<CalendarStore>()(
             url: normalizedUrl,
             calendarId: calendar.id,
             accountId: client.getAccountId(),
+            owner: subscriptionOwner(client),
             name,
             color,
             refreshInterval,
@@ -1323,8 +1375,15 @@ export const useCalendarStore = create<CalendarStore>()(
 
           // Initial fetch - roll back the calendar create if it fails so we
           // don't leave a phantom calendar around after a bad URL / 404 / etc.
-          await get().refreshICalSubscription(client, subscription.id);
+          // Plugins hear "added" for it, not also "refreshed".
+          subscriptionsBeingAdded.add(subscription.id);
+          try {
+            await get().refreshICalSubscription(client, subscription.id);
+          } finally {
+            subscriptionsBeingAdded.delete(subscription.id);
+          }
 
+          void calendarHooks.onICalSubscriptionChange.emit({ subscriptionId: subscription.id, change: 'added' });
           return subscription;
         } catch (error) {
           debug.error('Failed to add iCal subscription:', error);
@@ -1351,6 +1410,10 @@ export const useCalendarStore = create<CalendarStore>()(
       updateICalSubscription: async (client, subscriptionId, updates) => {
         const sub = get().icalSubscriptions.find(s => s.id === subscriptionId);
         if (!sub) return;
+        if (!(await claimSubscription(client, sub, set))) {
+          debug.warn('calendar', 'Not updating a subscription of another account', { sub: sub.name });
+          return;
+        }
 
         // Normalize webcal(s):// in the new URL so refreshes don't break.
         const normalizedUpdates: typeof updates = updates.url
@@ -1378,6 +1441,7 @@ export const useCalendarStore = create<CalendarStore>()(
             };
           }),
         }));
+        void calendarHooks.onICalSubscriptionChange.emit({ subscriptionId, change: 'updated' });
 
         // If URL changed, refresh to fetch events from new source
         if (normalizedUpdates.url && normalizedUpdates.url !== sub.url) {
@@ -1389,11 +1453,15 @@ export const useCalendarStore = create<CalendarStore>()(
         const sub = get().icalSubscriptions.find(s => s.id === subscriptionId);
         if (!sub) return;
 
-        try {
-          await client.deleteCalendar(sub.calendarId);
-        } catch (error) {
-          debug.error('Failed to delete subscription calendar:', error);
-          // Continue removing subscription record even if calendar delete fails
+        // Only destroy the calendar in the account the subscription belongs
+        // to: through another login its id names an unrelated calendar.
+        if (await claimSubscription(client, sub, set)) {
+          try {
+            await client.deleteCalendar(sub.calendarId);
+          } catch (error) {
+            debug.error('Failed to delete subscription calendar:', error);
+            // Continue removing subscription record even if calendar delete fails
+          }
         }
 
         set((state) => ({
@@ -1402,6 +1470,7 @@ export const useCalendarStore = create<CalendarStore>()(
           selectedCalendarIds: state.selectedCalendarIds.filter(id => id !== sub.calendarId),
           events: state.events.filter(e => !e.calendarIds?.[sub.calendarId]),
         }));
+        void calendarHooks.onICalSubscriptionChange.emit({ subscriptionId, change: 'removed' });
       },
 
       refreshICalSubscription: async (client, subscriptionId) => {
@@ -1411,10 +1480,10 @@ export const useCalendarStore = create<CalendarStore>()(
         const sub = get().icalSubscriptions.find(s => s.id === subscriptionId);
         if (!sub) return;
 
-        // Skip if the subscription is scoped to a different JMAP account
-        // than the one this client is talking to - otherwise we'd create
-        // events in the wrong account / against a missing calendar.
-        if (sub.accountId && sub.accountId !== client.getAccountId()) {
+        // Skip unless the subscription belongs to this login - otherwise the
+        // diff below would delete the events of whatever calendar in this
+        // account happens to have the same id.
+        if (!(await claimSubscription(client, sub, set))) {
           debug.warn('calendar', 'Skipping subscription refresh: account mismatch', { sub: sub.name });
           return;
         }
@@ -1428,7 +1497,7 @@ export const useCalendarStore = create<CalendarStore>()(
 
           if (!response.ok) {
             const data = await response.json().catch(() => ({}));
-            throw new Error(data.error || 'Failed to fetch calendar');
+            throw new Error(explainServerAuthError(response.status, data.error, 'Failed to fetch calendar'));
           }
 
           const blob = await response.blob();
@@ -1488,7 +1557,7 @@ export const useCalendarStore = create<CalendarStore>()(
 
           // Import new events (importEvents will re-fetch all events at the end)
           if (eventsToImport.length > 0) {
-            await get().importEvents(client, eventsToImport, sub.calendarId);
+            await importEventsUnhooked(client, eventsToImport, sub.calendarId);
           } else {
             // No new events to import, but stale ones may have been deleted
             // Re-fetch to reflect deletions
@@ -1509,6 +1578,9 @@ export const useCalendarStore = create<CalendarStore>()(
         refreshInFlight.set(subscriptionId, work);
         try {
           await work;
+          if (!subscriptionsBeingAdded.has(subscriptionId)) {
+            void calendarHooks.onICalSubscriptionChange.emit({ subscriptionId, change: 'refreshed' });
+          }
         } catch (error) {
           debug.error('Failed to refresh iCal subscription:', sub.name, error);
           throw error;
@@ -1520,13 +1592,13 @@ export const useCalendarStore = create<CalendarStore>()(
       refreshAllSubscriptions: async (client) => {
         const { icalSubscriptions } = get();
         const currentAccountId = client.getAccountId();
+        const owner = subscriptionOwner(client);
         const now = Date.now();
 
         for (const sub of icalSubscriptions) {
-          // Only refresh subs for the current account (or legacy untagged
-          // subs, which are treated as belonging to whichever account the
-          // user has active).
-          if (sub.accountId && sub.accountId !== currentAccountId) continue;
+          // Only refresh subs of this login. Older ones without an owner
+          // are checked (and adopted) by refreshICalSubscription.
+          if (sub.owner ? sub.owner !== owner : (sub.accountId && sub.accountId !== currentAccountId)) continue;
 
           const lastRefreshed = sub.lastRefreshed ? new Date(sub.lastRefreshed).getTime() : 0;
           const intervalMs = sub.refreshInterval * 60 * 1000;
@@ -1539,6 +1611,14 @@ export const useCalendarStore = create<CalendarStore>()(
             }
           }
         }
+      },
+
+      forgetICalSubscriptions: (owner) => {
+        set((state) => ({ icalSubscriptions: state.icalSubscriptions.filter(s => s.owner !== owner) }));
+      },
+
+      clearICalSubscriptions: () => {
+        set({ icalSubscriptions: [] });
       },
 
       clearState: () => {
@@ -1579,3 +1659,202 @@ export const useCalendarStore = create<CalendarStore>()(
     }
   )
 );
+
+/**
+ * Imports events into a calendar without the plugin import hooks. The
+ * store's importEvents wraps it with them; a subscription refresh calls it
+ * directly, since syncing a feed is not the user importing a file.
+ */
+async function importEventsUnhooked(
+  client: IJMAPClient,
+  events: Partial<CalendarEvent>[],
+  calendarId: string,
+): Promise<number> {
+  const get = useCalendarStore.getState;
+  const set = useCalendarStore.setState;
+  // Resolve shared calendar IDs
+  const cal = get().calendars.find(c => c.id === calendarId);
+  const realCalendarId = cal?.originalId || stripLocalAccountPrefix(calendarId, cal?.localAccountId);
+  const targetAccountId = cal?.accountId;
+  client = resolveAccountClient(client, cal?.localAccountId);
+
+  // Drop within-file UID duplicates first (first occurrence wins).
+  // CalendarEvent/parse already merges master + RECURRENCE-ID overrides
+  // into one object, so anything still sharing a UID here is a corrupt
+  // feed - creating both either fails ("UID already exists") or stores
+  // two events under one UID, depending on the Stalwart version.
+  const seenUids = new Set<string>();
+  let eventsToProcess = events.filter((e) => {
+    if (!e.uid) return true;
+    if (seenUids.has(e.uid)) return false;
+    seenUids.add(e.uid);
+    return true;
+  });
+
+  // Deduplicate UIDs: Stalwart enforces UID uniqueness across all calendars.
+  // - Events already in the target calendar → skip (true duplicates)
+  // - Events in other calendars → link to target calendar via calendarIds update
+  // - New events → create as normal
+  let linked = 0;
+  try {
+    const allServerEvents = await client.getCalendarEvents(undefined, targetAccountId);
+    const uidToEvent = new Map<string, { id: string; calendarIds: Record<string, boolean> }>();
+    for (const e of allServerEvents) {
+      if (e.uid) {
+        uidToEvent.set(e.uid, {
+          id: (e as CalendarEvent).originalId || e.id,
+          calendarIds: (e as CalendarEvent).originalCalendarIds || e.calendarIds || {},
+        });
+      }
+    }
+
+    const newEvents: Partial<CalendarEvent>[] = [];
+    const eventsToLink: { eventId: string; calendarIds: Record<string, boolean> }[] = [];
+
+    for (const e of eventsToProcess) {
+      if (!e.uid || !uidToEvent.has(e.uid)) {
+        // UID doesn't exist on server - create it
+        newEvents.push(e);
+      } else {
+        const existing = uidToEvent.get(e.uid)!;
+        if (existing.calendarIds[realCalendarId]) {
+          // Already in target calendar - skip
+          continue;
+        }
+        // Exists in another calendar - link to target calendar
+        eventsToLink.push({
+          eventId: existing.id,
+          calendarIds: { ...existing.calendarIds, [realCalendarId]: true },
+        });
+      }
+    }
+
+    // Batch-link existing events to the target calendar
+    for (const { eventId, calendarIds } of eventsToLink) {
+      try {
+        await client.updateCalendarEvent(eventId, { calendarIds } as Partial<CalendarEvent>, undefined, targetAccountId);
+        linked++;
+      } catch (err) {
+        debug.warn('calendar', `Import: failed to link event ${eventId} to target calendar:`, err);
+      }
+    }
+
+    if (linked > 0) {
+      debug.log('calendar', `Import: linked ${linked} existing events to target calendar`);
+    }
+    const skipped = eventsToProcess.length - newEvents.length - eventsToLink.length;
+    if (skipped > 0) {
+      debug.log('calendar', `Import: skipped ${skipped} events already in target calendar`);
+    }
+    eventsToProcess = newEvents;
+  } catch (error) {
+    debug.warn('calendar', 'Could not fetch existing events for deduplication, proceeding without:', error);
+  }
+
+  // Prepare all events for batch creation
+  const prepared: Partial<CalendarEvent>[] = [];
+  for (const event of eventsToProcess) {
+    const src = sanitizeOutgoingCalendarEventData(event as Partial<CalendarEvent>);
+    let cleanParticipants: Record<string, CalendarParticipant> | null = null;
+    if (src.participants) {
+      cleanParticipants = {};
+      for (const [key, p] of Object.entries(src.participants)) {
+        const participant: Record<string, unknown> = {
+          '@type': 'Participant',
+          name: p.name,
+          email: p.email,
+          // calendarAddress carries the scheduling address in jscalendarbis
+          // (Stalwart); sendTo is retired there, so it only serves as a
+          // fallback source for events parsed from legacy RFC 8984 data.
+          calendarAddress: p.calendarAddress || p.sendTo?.imip,
+          description: p.description,
+          kind: p.kind,
+          roles: p.roles,
+          participationStatus: p.participationStatus,
+          participationComment: p.participationComment,
+          expectReply: p.expectReply,
+          scheduleAgent: p.scheduleAgent,
+          scheduleForceSend: p.scheduleForceSend,
+          scheduleId: p.scheduleId,
+          delegatedTo: p.delegatedTo,
+          delegatedFrom: p.delegatedFrom,
+          memberOf: p.memberOf,
+          locationId: p.locationId,
+          language: p.language,
+          links: p.links,
+        };
+        Object.keys(participant).forEach(k => {
+          if (participant[k] === undefined || participant[k] === null) delete participant[k];
+        });
+        cleanParticipants[key] = participant as unknown as CalendarParticipant;
+      }
+    }
+
+    const data: Partial<CalendarEvent> = {
+      calendarIds: { [realCalendarId]: true },
+      uid: src.uid,
+      title: src.title,
+      description: src.description,
+      descriptionContentType: src.descriptionContentType,
+      start: src.start,
+      duration: src.showWithoutTime ? normalizeAllDayDuration(src.duration) : src.duration,
+      timeZone: src.showWithoutTime ? null : src.timeZone,
+      showWithoutTime: src.showWithoutTime,
+      status: src.status,
+      freeBusyStatus: src.freeBusyStatus,
+      privacy: src.privacy,
+      color: src.color,
+      keywords: src.keywords,
+      categories: src.categories,
+      locale: src.locale,
+      // Stalwart derives the iCalendar ORGANIZER solely from
+      // organizerCalendarAddress (replyTo is retired in jscalendarbis);
+      // dropping it here would strip the ORGANIZER from imported invites
+      // and break RSVP replies afterwards.
+      organizerCalendarAddress: src.organizerCalendarAddress || src.replyTo?.imip,
+      locations: src.locations,
+      virtualLocations: src.virtualLocations,
+      links: src.links,
+      recurrenceRules: src.recurrenceRules,
+      recurrenceOverrides: src.recurrenceOverrides,
+      excludedRecurrenceRules: src.excludedRecurrenceRules,
+      alerts: src.alerts,
+      participants: cleanParticipants,
+    };
+    Object.keys(data).forEach(k => {
+      const v = (data as Record<string, unknown>)[k];
+      if (v === undefined || v === null) delete (data as Record<string, unknown>)[k];
+    });
+    prepared.push(data);
+  }
+
+  if (prepared.length === 0) return linked;
+
+  // Batch create in chunks of 50 to avoid oversized requests
+  const BATCH_SIZE = 50;
+  let imported = 0;
+  for (let i = 0; i < prepared.length; i += BATCH_SIZE) {
+    const batch = prepared.slice(i, i + BATCH_SIZE);
+    try {
+      const { created, failed, notCreated } = await client.batchCreateCalendarEvents(batch, targetAccountId);
+      imported += created.length;
+      if (failed.length > 0) {
+        const first = Object.values(notCreated)[0];
+        const reason = first?.description || first?.type || 'unknown error';
+        debug.warn('calendar', `Import batch ${i / BATCH_SIZE + 1}: ${failed.length} events failed (${reason})`);
+        set({ error: `${failed.length} event(s) could not be imported: ${reason}` });
+      }
+    } catch (error) {
+      debug.error(`Import batch ${i / BATCH_SIZE + 1} failed:`, error);
+    }
+  }
+
+  // Re-fetch all events properly so the store state is consistent
+  // (with recurrence expansion, multi-account mapping, etc.)
+  const { dateRange } = get();
+  if (dateRange) {
+    await get().fetchEvents(client, dateRange.start, dateRange.end);
+  }
+
+  return imported + linked;
+}

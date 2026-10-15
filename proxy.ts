@@ -2,13 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import createIntlMiddleware from "next-intl/middleware";
 import { routing } from "./i18n/routing";
 import { localeFromAcceptLanguage } from "./i18n/locale-matcher";
+import { isSameOriginRequest } from "./lib/security/same-origin";
 import { getEnabledPluginFrameOrigins } from "./lib/admin/csp-frame-origins";
 import {
-  APP_FRAME_ORIGINS_COOKIE,
   inlineAppFrameOrigins,
   parseAppFrameOrigins,
+  pickAppFrameOriginsCookie,
 } from "./lib/security/app-frame-origins";
 import { configManager } from "./lib/admin/config-manager";
+import { getWopiEditorOrigins } from "./lib/wopi/discovery";
 import { detectSetupState } from "./lib/setup/state";
 
 const intlMiddleware = createIntlMiddleware(routing);
@@ -50,7 +52,21 @@ function withMatchedChineseAcceptLanguage(request: NextRequest): NextRequest {
 // (e.g. `export const config = { matcher }`) is no longer allowed in the
 // proxy file. We replicate the previous matcher inline by short-circuiting
 // requests for API routes, Next internals and static assets.
-const PROXY_SKIP_PATTERN = /^\/(?:api|_next)(?:\/|$)|\.[^/]+$/;
+const PROXY_SKIP_PATTERN = /^\/(?:api|_next)(?:\/|$)/;
+
+// What Next serves from public/: a single dotted segment at the root
+// (/sw.js, /favicon.ico, /manifest.webmanifest) and the branding/,
+// notification/ and demo/ asset folders. The upstream matcher treated EVERY path whose
+// last segment has a dot as a static file, but the [[...segments]] catch-alls
+// under /<locale>/mail, /calendar, /contacts and /files make
+// /en/mail/folder/inbox/statement.pdf a real signed-in page, and it rendered
+// without a CSP or any other security header (GHSA-xvjh-v9c6-qcvc). Only what
+// is genuinely static may skip locale routing and the headers.
+const STATIC_ASSET_PATTERN = /^\/[^/]+\.[^/]+$|^\/(?:branding|notification|demo)\//;
+
+export function isStaticAssetPath(pathname: string): boolean {
+  return STATIC_ASSET_PATTERN.test(pathname);
+}
 
 /**
  * Hand the route every request header the client sent, plus `extra`.
@@ -62,7 +78,7 @@ const PROXY_SKIP_PATTERN = /^\/(?:api|_next)(?:\/|$)|\.[^/]+$/;
  * Next-Url, Cookie, Accept-Language, ... from every page request that skips
  * the intl middleware: all locale-prefixed paths - i.e. every page of a
  * NEXT_PUBLIC_LOCALE_PREFIX=always (Docker) build - plus /admin, /protocol,
- * /setup and the plugin sandbox. Since Next 16.3 the server recomputes the
+ * /setup, /connector and the plugin sandbox. Since Next 16.3 the server recomputes the
  * `_rsc` cache-busting hash from those router headers
  * (experimental.validateRSCRequestHeaders, on by default) and answers a
  * mismatch with a 307 to the "expected" URL; the client re-requests, the
@@ -100,6 +116,29 @@ function forwardRequestHeaders(
   return response;
 }
 
+/**
+ * The path Next routes on. `nextUrl.pathname` keeps percent-escapes, but the
+ * route matcher decodes them, so `/api/%61uth/session` reaches the
+ * `/api/auth/session` handler. Security decisions must use the decoded form
+ * or an escaped spelling walks around them.
+ */
+export function routePathOf(pathname: string): string {
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return pathname;
+  }
+}
+
+/**
+ * Paths under /api/ that must accept requests without a same-origin browser
+ * context: the office editor's WOPI host calls the file endpoints
+ * server-to-server with a token of its own, not the session cookie.
+ */
+function isOriginGateExempt(routePath: string): boolean {
+  return routePath.startsWith("/api/wopi/files/");
+}
+
 function isSetupPath(pathname: string): boolean {
   return (
     pathname === "/setup" ||
@@ -113,7 +152,10 @@ export async function proxy(request: NextRequest) {
   // boot triggers the config load; subsequent calls are in-memory.
   await configManager.ensureLoaded();
   const setupState = detectSetupState();
-  const pathname = request.nextUrl.pathname;
+  // Raw form for what is echoed back (x-pathname); decoded form for every
+  // decision about the request.
+  const rawPathname = request.nextUrl.pathname;
+  const pathname = routePathOf(rawPathname);
 
   if (setupState === "bootstrap") {
     // Wizard active. Redirect HTML pages to /setup; let asset/internal
@@ -127,7 +169,7 @@ export async function proxy(request: NextRequest) {
       // Public read endpoint - serves wizard-uploaded branding assets so
       // image previews work during the wizard. No auth on the GET route.
       pathname.startsWith("/api/admin/branding/") ||
-      /\.[^/]+$/.test(pathname);
+      isStaticAssetPath(pathname);
 
     if (!allowed) {
       if (pathname.startsWith("/api/")) {
@@ -155,8 +197,28 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (PROXY_SKIP_PATTERN.test(pathname)) {
-    return NextResponse.next();
+  // Outer CSRF gate for every API route (GHSA-qvr9-m8cq-7wvg,
+  // GHSA-9mvj-98f5-9q6g). The identity cookies are SameSite=Lax, which a
+  // same-site sibling origin still receives, so any route that acts with
+  // them needs an origin check. The state-changing handlers check this
+  // themselves as well; this layer covers any route added later.
+  // GET/HEAD/OPTIONS pass through untouched.
+  if (pathname.startsWith("/api/") && !isOriginGateExempt(pathname) && !isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "Cross-origin request rejected" }, { status: 403 });
+  }
+
+  if (PROXY_SKIP_PATTERN.test(pathname) || isStaticAssetPath(pathname)) {
+    // No page CSP here, but what comes back can still be a document: the
+    // not-found shell for a missing /foo.html or an unknown /api route. It
+    // must not be framed or sniffed into another type. API routes set their
+    // own CSP where they need one, so only non-API paths get frame-ancestors.
+    const skipped = NextResponse.next();
+    skipped.headers.set("X-Content-Type-Options", "nosniff");
+    skipped.headers.set("X-Frame-Options", "DENY");
+    if (!pathname.startsWith("/api/")) {
+      skipped.headers.set("Content-Security-Policy", "frame-ancestors 'none'");
+    }
+    return skipped;
   }
 
   const nonce = crypto.randomUUID();
@@ -174,16 +236,50 @@ export async function proxy(request: NextRequest) {
     pathname === "/plugin-sandbox-privileged" ||
     pathname.startsWith("/plugin-sandbox-privileged/");
 
+  // The sandbox routes are only ever loaded as iframes by the host bridge.
+  // Refuse them as a top-level document (window.open() from another site, a
+  // typed URL): the browser sets `Sec-Fetch-Dest` and page script cannot
+  // forge it; browsers without it fall through to the runtime's own host gate.
+  // They also disappear entirely while the plugin feature is off, so a stock
+  // install never serves a document carrying 'unsafe-eval'
+  // (GHSA-96cx-gx36-3g79). Other destinations pass - `iframe` for the bridge,
+  // `empty` for the router's own RSC refetches - and cross-site framing is
+  // already blocked by the `frame-ancestors 'self'` below.
+  if (isSandboxPath) {
+    const pluginsEnabled = configManager.getPolicy().features?.pluginsEnabled === true;
+    if (!pluginsEnabled || request.headers.get("sec-fetch-dest") === "document") {
+      return new NextResponse("The plugin sandbox is only served inside the webmail.", {
+        status: 403,
+        headers: { "content-type": "text/plain" },
+      });
+    }
+  }
+
   const scriptSrc = isSandboxPath
     ? `'self' 'nonce-${nonce}' 'unsafe-eval'`
     : isDev
     ? `'self' 'nonce-${nonce}' 'unsafe-eval'`
     : `'self' 'nonce-${nonce}'`;
 
-  const connectSrc = isDev ? `'self' http: https: ws: wss:` : `'self' https:`;
+  // A plugin reaches the network only through api.http.fetch, which the host
+  // checks against the manifest's httpOrigins (H-03). The sandbox document
+  // itself gets its own origin and nothing else, so fetch(), images, fonts
+  // and CSS url() can't carry data to a host the manifest didn't name. Its
+  // own origin stays because the router refetches the page as RSC.
+  const connectSrc = isSandboxPath
+    ? `'self'`
+    : isDev ? `'self' http: https: ws: wss:` : `'self' https:`;
+  const imgSrc = isSandboxPath ? `'self' data: blob:` : `'self' data: blob: https:`;
+  const fontSrc = isSandboxPath ? `'self' data:` : `'self' https: data:`;
 
+  // The admin dashboard and the setup wizard are never framed. The embedding
+  // allowance is for the mail UI a portal wraps; a framed admin page is a
+  // clickjacking target with nothing to gain from being embedded.
+  const isAdminOrSetupPath = /^\/(?:admin|setup)(?:\/|$)/.test(pathname);
   const frameAncestors = isSandboxPath
     ? `'self'`
+    : isAdminOrSetupPath
+    ? "'none'"
     : process.env.ALLOWED_FRAME_ANCESTORS?.trim() || "'none'";
 
   // Plugins may declare iframe origins they need (e.g. for embedded video).
@@ -197,7 +293,10 @@ export async function proxy(request: NextRequest) {
   const policy = configManager.getPolicy();
   const sidebarAppsEnabled = policy.features?.sidebarAppsEnabled !== false;
   const appFrameOrigins = sidebarAppsEnabled
-    ? parseAppFrameOrigins(request.cookies.get(APP_FRAME_ORIGINS_COOKIE)?.value)
+    ? parseAppFrameOrigins(pickAppFrameOriginsCookie(
+        (name) => request.cookies.get(name)?.value,
+        request.nextUrl.protocol === "https:" || request.headers.get("x-forwarded-proto") === "https",
+      ))
     : [];
 
   // Apps the operator pins for everyone (#931) are known server-side, so their
@@ -208,18 +307,14 @@ export async function proxy(request: NextRequest) {
 
   // WOPI document editor (#425): the editor is launched by POSTing the access
   // token into an iframe on its origin, so that origin must be allowed in both
-  // frame-src AND form-action (which is otherwise 'self').
-  let wopiOrigin = "";
-  try {
-    const wopiClientUrl = configManager.get<string>("wopiClientUrl", "").trim();
-    if (wopiClientUrl) wopiOrigin = new URL(wopiClientUrl).origin;
-  } catch {
-    // Invalid admin-supplied URL - leave the CSP unchanged.
-  }
+  // frame-src AND form-action (which is otherwise 'self'). The browser loads
+  // it from the origins the editor's discovery names, which are not that of
+  // wopiClientUrl when discovery is fetched over an internal address (#1130).
+  const wopiOrigins = await getWopiEditorOrigins();
 
   const frameOrigins: string[] = [];
   const seenFrameOrigins = new Set<string>();
-  for (const origin of [...pluginFrameOrigins, ...managedAppFrameOrigins, ...appFrameOrigins, ...(wopiOrigin ? [wopiOrigin] : [])]) {
+  for (const origin of [...pluginFrameOrigins, ...managedAppFrameOrigins, ...appFrameOrigins, ...wopiOrigins]) {
     const key = origin.toLowerCase();
     if (seenFrameOrigins.has(key)) continue;
     seenFrameOrigins.add(key);
@@ -235,13 +330,15 @@ export async function proxy(request: NextRequest) {
     `default-src 'self'`,
     `script-src ${scriptSrc}`,
     `style-src 'self' 'unsafe-inline'`,
-    `img-src 'self' data: blob: https:`,
-    `font-src 'self' https: data:`,
+    `img-src ${imgSrc}`,
+    `font-src ${fontSrc}`,
     `connect-src ${connectSrc}`,
     frameSrc,
     `object-src 'self' blob:`,
     `base-uri 'self'`,
-    `form-action 'self'${wopiOrigin ? ` ${wopiOrigin}` : ""}`,
+    // Plugin frames may use <form> for its submit event (allow-forms), but a
+    // form must not post anywhere: that would be a way out past connect-src.
+    isSandboxPath ? `form-action 'none'` : `form-action ${["'self'", ...wopiOrigins].join(" ")}`,
     `frame-ancestors ${frameAncestors}`,
     `media-src 'self' blob:`,
   ].join("; ");
@@ -250,6 +347,10 @@ export async function proxy(request: NextRequest) {
   const isAdminRoute = pathname === '/admin' || pathname.startsWith('/admin/');
   const isProtocolRoute = pathname === '/protocol' || pathname.startsWith('/protocol/');
   const isSetupRoute = pathname === '/setup' || pathname.startsWith('/setup/');
+  // Connector links (/connector/<target>) are published in docs and READMEs
+  // and must not carry a locale. Letting next-intl rewrite them to
+  // /en/connector/... 404s, which breaks every link already in the wild.
+  const isConnectorRoute = pathname === '/connector' || pathname.startsWith('/connector/');
   // The plugin sandbox lives in its own root layout under app/(sandbox)/ and
   // is not part of the localized tree. Letting next-intl rewrite the path to
   // /en/plugin-sandbox 404s, which kills the iframe and disables every plugin.
@@ -264,7 +365,14 @@ export async function proxy(request: NextRequest) {
   );
 
   let intlResponse: ReturnType<typeof intlMiddleware> | null = null;
-  if (!isAdminRoute && !isProtocolRoute && !isSetupRoute && !isSandboxRoute && !hasLocalePrefix) {
+  if (
+    !isAdminRoute &&
+    !isProtocolRoute &&
+    !isSetupRoute &&
+    !isSandboxRoute &&
+    !isConnectorRoute &&
+    !hasLocalePrefix
+  ) {
     try {
       intlResponse = intlMiddleware(withMatchedChineseAcceptLanguage(request));
     } catch (error) {
@@ -278,7 +386,7 @@ export async function proxy(request: NextRequest) {
   // so getLocale() can't resolve the active locale there and falls back to the
   // default - emitting <html lang="en"> on e.g. /de pages, which makes browsers
   // offer to "translate this page". The layout reads x-pathname to recover it.
-  forwardRequestHeaders(response, request, { "x-nonce": nonce, "x-pathname": pathname });
+  forwardRequestHeaders(response, request, { "x-nonce": nonce, "x-pathname": rawPathname });
 
   response.headers.set("X-Content-Type-Options", "nosniff");
 

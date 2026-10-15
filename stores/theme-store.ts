@@ -6,6 +6,7 @@ import {
   injectThemeCSS,
   removeThemeCSS,
   sanitizeThemeCSS,
+  sanitizeSkinCSS,
   injectThemeSkinCSS,
   removeThemeSkinCSS,
 } from '@/lib/theme-loader';
@@ -15,6 +16,7 @@ import { usePolicyStore } from '@/stores/policy-store';
 import { apiFetch } from '@/lib/browser-navigation';
 import { themeHooks } from '@/lib/plugin-hooks';
 import { syncThemeColorMeta } from '@/lib/theme-color-meta';
+import { IS_LITE } from '@/lib/lite';
 
 type Theme = 'light' | 'dark' | 'system';
 
@@ -336,6 +338,8 @@ export const useThemeStore = create<ThemeState>()(
       },
 
       syncServerThemes: async () => {
+        // Server-managed themes come from the admin dashboard; none in Lite.
+        if (IS_LITE) return;
         if (themeSyncPromise) {
           await themeSyncPromise;
           return;
@@ -356,10 +360,12 @@ export const useThemeStore = create<ThemeState>()(
 
               if (!local) {
                 // Download and install new server theme
-                const css = await downloadThemeCSS(st.id);
+                const css = await downloadThemeAsset(st, 'css');
                 if (!css) continue;
+                const skin = st.hasSkin ? await downloadThemeAsset(st, 'skin') : null;
 
                 const sanitized = sanitizeThemeCSS(css);
+                const sanitizedSkin = skin ? sanitizeSkinCSS(skin).css : undefined;
                 const theme: InstalledTheme = {
                   id: st.id,
                   name: st.name,
@@ -372,9 +378,12 @@ export const useThemeStore = create<ThemeState>()(
                   builtIn: false,
                   managed: true,
                   forceEnabled: st.forceEnabled,
+                  contentHash: st.contentHash,
+                  ...(sanitizedSkin ? { skin: sanitizedSkin } : {}),
                 };
 
                 await pluginStorage.saveThemeCSS(st.id, sanitized.css);
+                if (sanitizedSkin) await pluginStorage.saveThemeSkin(st.id, sanitizedSkin);
                 set(state => {
                   if (state.installedThemes.some(t => t.id === st.id)) {
                     return {};
@@ -386,14 +395,24 @@ export const useThemeStore = create<ThemeState>()(
 
               } else if (!local.builtIn) {
                 let css = local.css;
+                let skin = local.skin;
+                // The hash catches a re-upload of the same version.
+                const changed = local.version !== st.version
+                  || (!!st.contentHash && local.contentHash !== st.contentHash);
 
-                if (local.version !== st.version || !css) {
-                  const downloadedCss = await downloadThemeCSS(st.id);
+                if (changed || !css) {
+                  const downloadedCss = await downloadThemeAsset(st, 'css');
                   if (!downloadedCss) continue;
 
                   const sanitized = sanitizeThemeCSS(downloadedCss);
                   css = sanitized.css;
                   await pluginStorage.saveThemeCSS(st.id, sanitized.css);
+                }
+                if (changed) {
+                  const downloadedSkin = st.hasSkin ? await downloadThemeAsset(st, 'skin') : null;
+                  skin = downloadedSkin ? sanitizeSkinCSS(downloadedSkin).css : undefined;
+                  if (skin) await pluginStorage.saveThemeSkin(st.id, skin);
+                  else await pluginStorage.deleteThemeSkin(st.id);
                 }
 
                 const updatedTheme = {
@@ -403,9 +422,11 @@ export const useThemeStore = create<ThemeState>()(
                   author: st.author,
                   description: st.description || '',
                   css,
+                  skin,
                   variants: st.variants as ThemeVariant[],
                   managed: true,
                   forceEnabled: st.forceEnabled,
+                  contentHash: st.contentHash,
                 };
 
                 set(state => ({
@@ -419,6 +440,29 @@ export const useThemeStore = create<ThemeState>()(
                   applyCustomThemeCSS(updatedTheme, get().resolvedTheme);
                 }
               }
+            }
+
+            // A managed theme the server no longer lists was deleted or
+            // disabled by the admin. Without this it stayed installed, and
+            // its local forceEnabled flag kept forcing it on forever.
+            const serverIds = new Set(serverThemes.map(t => t.id));
+            const stale = get().installedThemes.filter(t => t.managed && !t.builtIn && !serverIds.has(t.id));
+            if (stale.length > 0) {
+              const staleIds = new Set(stale.map(t => t.id));
+              const activeId = get().activeThemeId;
+              if (activeId && staleIds.has(activeId)) {
+                removeThemeCSS();
+                removeThemeSkinCSS();
+                set({ activeThemeId: null });
+              }
+              for (const id of staleIds) {
+                void pluginStorage.deleteThemeCSS(id);
+                void pluginStorage.deleteThemeSkin(id);
+                void pluginStorage.deletePreview(id);
+              }
+              set(state => ({
+                installedThemes: state.installedThemes.filter(t => !staleIds.has(t.id)),
+              }));
             }
 
             set(state => ({
@@ -548,7 +592,8 @@ function applyCustomThemeCSS(theme: InstalledTheme, resolvedTheme: 'light' | 'da
       // Bail out if the user switched themes while we were awaiting handlers.
       if (useThemeStore.getState().activeThemeId !== themeId) return;
       if (transformed && transformed !== theme.css) {
-        injectThemeCSS(transformed);
+        // A plugin's output gets no more reach than a theme's own CSS.
+        injectThemeCSS(sanitizeThemeCSS(transformed).css);
       }
     })
     .catch(() => {
@@ -566,6 +611,8 @@ interface ServerThemeInfo {
   description: string;
   variants: string[];
   forceEnabled: boolean;
+  hasSkin?: boolean;
+  contentHash?: string;
 }
 
 function dedupeInstalledThemes(themes: InstalledTheme[]): InstalledTheme[] {
@@ -591,13 +638,26 @@ function dedupeInstalledThemes(themes: InstalledTheme[]): InstalledTheme[] {
   return [...byId.values()];
 }
 
-async function downloadThemeCSS(themeId: string): Promise<string | null> {
+async function downloadThemeAsset(theme: ServerThemeInfo, kind: 'css' | 'skin'): Promise<string | null> {
+  // The content hash in the URL keeps a browser cache from serving the
+  // previous upload.
+  const version = theme.contentHash ? `?v=${encodeURIComponent(theme.contentHash)}` : '';
   try {
-    const res = await apiFetch(`/api/admin/themes/${encodeURIComponent(themeId)}/css`);
+    const res = await apiFetch(`/api/admin/themes/${encodeURIComponent(theme.id)}/${kind}${version}`);
     if (!res.ok) return null;
     return await res.text();
   } catch {
-    console.warn(`[theme-store] Failed to download CSS for theme "${themeId}"`);
+    console.warn(`[theme-store] Failed to download ${kind} for theme "${theme.id}"`);
     return null;
   }
 }
+// Plugins hear about every change of scheme or theme, whichever path made it
+// (settings, the system switching to dark, a forced admin theme).
+useThemeStore.subscribe((state, prev) => {
+  if (state.theme !== prev.theme || state.resolvedTheme !== prev.resolvedTheme) {
+    void themeHooks.onThemeChange.emit({ theme: state.theme, resolved: state.resolvedTheme });
+  }
+  if (state.activeThemeId !== prev.activeThemeId) {
+    void themeHooks.onCustomThemeChange.emit({ themeId: state.activeThemeId });
+  }
+});

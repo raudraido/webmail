@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { HookBus, pluginErrorTracker, removeAllPluginHooks, clearAllHooks, emailHooks, calendarHooks, isExternalAttachmentResult } from '../plugin-hooks';
+import { HookBus, pluginErrorTracker, removeAllPluginHooks, clearAllHooks, emailHooks, calendarHooks, isExternalAttachmentResult, setHookTimeoutListener } from '../plugin-hooks';
+import type { CalendarEventFormView } from '../plugin-types';
 
 beforeEach(() => {
   pluginErrorTracker.resetAll();
@@ -199,6 +200,56 @@ describe('HookBus', () => {
   });
 });
 
+// #1207: a send-takeover handler that failed or was cancelled let the host
+// delete the draft, and one that threw let the host send the message unsigned.
+describe('onComposeSend takeOver', () => {
+  it('reports a send the plugin made itself', async () => {
+    emailHooks.onComposeSend.register('smime', () => false);
+    expect(await emailHooks.onComposeSend.takeOver({})).toBe('handled');
+  });
+
+  it('reports an abort the plugin asked for', async () => {
+    emailHooks.onComposeSend.register('smime', () => ({ abort: true }));
+    expect(await emailHooks.onComposeSend.takeOver({})).toBe('aborted');
+  });
+
+  it('leaves the send to the host when no plugin takes it', async () => {
+    emailHooks.onComposeSend.register('other', () => undefined);
+    emailHooks.onComposeSend.register('guard', () => true);
+    expect(await emailHooks.onComposeSend.takeOver({})).toBe('default');
+  });
+
+  it('fails closed when a handler throws', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const later = vi.fn(() => false);
+    emailHooks.onComposeSend.register('smime', () => { throw new Error('no key'); }, 10);
+    emailHooks.onComposeSend.register('later', later, 20);
+    expect(await emailHooks.onComposeSend.takeOver({})).toBe('failed');
+    expect(later).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it('waits for a slow passphrase prompt and fails closed after the budget', async () => {
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      emailHooks.onComposeSend.register('smime', () => new Promise(resolve => setTimeout(() => resolve(false), 5 * 60_000)));
+      const slow = emailHooks.onComposeSend.takeOver({});
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 100);
+      expect(await slow).toBe('handled');
+
+      emailHooks.onComposeSend.clear();
+      emailHooks.onComposeSend.register('stuck', () => new Promise(() => {}));
+      const stuck = emailHooks.onComposeSend.takeOver({});
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 100);
+      expect(await stuck).toBe('failed');
+    } finally {
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('onBeforeBlobUpload offload budget', () => {
   it('gives the hook room for a real upload, not the 5s default', async () => {
     vi.useFakeTimers();
@@ -294,6 +345,54 @@ describe('Hook domain instances', () => {
     expect(calendarHooks.onBeforeEventCreate).toBeInstanceOf(HookBus);
     expect(calendarHooks.onEventRsvp).toBeInstanceOf(HookBus);
   });
+
+  it('onCalendarEventFormSave pipes a returned patch through transform with the form view', async () => {
+    const { calendarFormHooks } = await import('../plugin-hooks');
+    const views: CalendarEventFormView[] = [];
+    const disposable = calendarFormHooks.onCalendarEventFormSave.register(
+      'test-p',
+      async (_patch, view) => {
+        views.push(view);
+        return { virtualLocation: 'https://meet.example.com/rooms/x?role=host' };
+      },
+    );
+
+    const patch = await calendarFormHooks.onCalendarEventFormSave.transform(
+      {},
+      {
+        title: 'Team Sync',
+        description: '',
+        start: '2026-10-09T10:00:00',
+        end: '2026-10-09T11:00:00',
+        isAllDay: false,
+        location: '',
+        virtualLocation: '',
+        calendarId: 'cal-1',
+        uid: 'uid-1',
+        attendees: ['a@sunbeam.pt'],
+      },
+    );
+
+    expect(patch).toEqual({ virtualLocation: 'https://meet.example.com/rooms/x?role=host' });
+    expect(views[0]).toMatchObject({ title: 'Team Sync', uid: 'uid-1', attendees: ['a@sunbeam.pt'] });
+    disposable.dispose();
+  });
+
+  it('onCalendarEventFormSave keeps the form unchanged when handlers return undefined', async () => {
+    const { calendarFormHooks } = await import('../plugin-hooks');
+    const disposable = calendarFormHooks.onCalendarEventFormSave.register('test-p', async () => undefined);
+
+    const patch = await calendarFormHooks.onCalendarEventFormSave.transform(
+      { virtualLocation: 'keep-me' },
+      {
+        title: 'T', description: '', start: '', end: '', isAllDay: false,
+        location: '', virtualLocation: '', calendarId: 'cal-1', attendees: [],
+      },
+    );
+
+    expect(patch).toEqual({ virtualLocation: 'keep-me' });
+    disposable.dispose();
+  });
 });
 
 describe('removeAllPluginHooks', () => {
@@ -316,5 +415,48 @@ describe('clearAllHooks', () => {
     clearAllHooks();
     expect(emailHooks.onEmailOpen.size).toBe(0);
     expect(calendarHooks.onCalendarEventOpen.size).toBe(0);
+  });
+});
+
+describe('onBeforeEmailSend fails closed', () => {
+  it('does not send when the plugin never answers', async () => {
+    // A plugin that shows a confirm and waits for the user used to let the
+    // mail go out after 60 s, with the dialog still on screen.
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      emailHooks.onBeforeEmailSend.register('guard', () => new Promise(() => {}));
+      const result = emailHooks.onBeforeEmailSend.intercept({});
+      await vi.advanceTimersByTimeAsync(10 * 60_000 + 100);
+      expect(await result).toBe(false);
+    } finally {
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not send when the plugin throws', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    emailHooks.onBeforeEmailSend.register('guard', () => { throw new Error('boom'); });
+    expect(await emailHooks.onBeforeEmailSend.intercept({})).toBe(false);
+    consoleSpy.mockRestore();
+  });
+
+  it('closes the dialogs of a plugin whose hook ran out of time', async () => {
+    vi.useFakeTimers();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTimeout = vi.fn();
+    setHookTimeoutListener(onTimeout);
+    try {
+      emailHooks.onBeforeReply.register('slow', () => new Promise(() => {}));
+      const result = emailHooks.onBeforeReply.intercept({});
+      await vi.advanceTimersByTimeAsync(60_000 + 100);
+      expect(await result).toBe(true);
+      expect(onTimeout).toHaveBeenCalledWith('slow');
+    } finally {
+      setHookTimeoutListener(null);
+      consoleSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

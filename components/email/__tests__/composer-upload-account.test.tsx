@@ -144,6 +144,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -151,8 +159,8 @@ vi.mock('@/lib/plugin-hooks', () => ({
     onRecipientChipsChange: { transform: async (chips: unknown) => chips },
     onDraftChange: { emit: () => {} },
     onBeforeDraftAutoSave: { transform: async (draft: unknown) => draft },
-    onBeforeEmailSend: { intercept: async () => true },
-    onComposeSend: { intercept: async () => true },
+    onBeforeEmailSend: { intercept: async () => true, interceptOutcome: async () => 'allowed' },
+    onComposeSend: { takeOver: async () => 'default' },
     onTransformOutgoingEmail: { transform: async (email: unknown) => email },
     onBeforeAttachmentUpload: { intercept: async () => true },
     onBeforeBlobUpload: { transform: async (fileId: unknown) => fileId },
@@ -165,11 +173,15 @@ vi.mock('@/lib/plugin-hooks', () => ({
   isExternalAttachmentResult: () => false,
 }));
 
+const { deleteStagedFile } = vi.hoisted(() => ({
+  deleteStagedFile: vi.fn(async (_id: string) => {}),
+}));
+
 vi.mock('@/lib/plugin-storage', () => ({
   fileStorage: {
     saveFile: async () => {},
     getFile: async () => null,
-    deleteFile: async () => {},
+    deleteFile: deleteStagedFile,
   },
 }));
 
@@ -267,5 +279,77 @@ describe('composer attachment upload account (#943)', () => {
     expect(otherClient.uploadBlob).toHaveBeenCalledTimes(1);
     expect(otherClient.uploadBlob.mock.calls[0][0]).toBe(file);
     expect(activeClient.uploadBlob).not.toHaveBeenCalled();
+  });
+
+  // Firefox backs a File read from IndexedDB with the stored record; deleting
+  // the staged copy before the upload finished made XHR send 0 bytes under
+  // the full Content-Length (nginx 400).
+  it('keeps the staged file until the upload has finished', async () => {
+    const { otherClient } = mockClients();
+    let finishUpload!: (v: { blobId: string }) => void;
+    otherClient.uploadBlob.mockImplementation(
+      () => new Promise((resolve) => { finishUpload = resolve; }),
+    );
+    render(
+      <EmailComposer
+        initialData={{
+          to: '',
+          cc: '',
+          bcc: '',
+          subject: '',
+          body: '',
+          showCc: false,
+          showBcc: false,
+          selectedIdentityId: 'acct-2::id-other',
+          subAddressTag: '',
+          mode: 'compose',
+          draftId: null,
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['hello'], 'hello.txt', { type: 'text/plain' });
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(otherClient.uploadBlob).toHaveBeenCalledTimes(1);
+    expect(deleteStagedFile).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishUpload({ blobId: 'blob-other' });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(deleteStagedFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not upload files over the server limits', async () => {
+    const { otherClient } = mockClients();
+    Object.assign(otherClient, { getMaxSizeUpload: () => 10, getMaxSizeAttachmentsPerEmail: () => 12 });
+    render(
+      <EmailComposer
+        initialData={{
+          to: '', cc: '', bcc: '', subject: '', body: '', showCc: false, showBcc: false,
+          selectedIdentityId: 'acct-2::id-other', subAddressTag: '', mode: 'compose', draftId: null,
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const tooBig = new File(['x'.repeat(11)], 'big.txt', { type: 'text/plain' });
+    const first = new File(['x'.repeat(8)], 'a.txt', { type: 'text/plain' });
+    const second = new File(['x'.repeat(8)], 'b.txt', { type: 'text/plain' });
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [tooBig, first, second] } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // big.txt is over the per-file limit; b.txt would push the message past 12.
+    expect(otherClient.uploadBlob).toHaveBeenCalledTimes(1);
+    expect(otherClient.uploadBlob.mock.calls[0][0]).toBe(first);
   });
 });

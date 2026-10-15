@@ -79,11 +79,6 @@ export function getEffectiveTimeZone(): string {
   return resolveTimeZone(useSettingsStore.getState().timeZone);
 }
 
-/** True when the user's override is active and differs from the browser zone. */
-export function isTimeZoneOverridden(): boolean {
-  return getEffectiveTimeZone() !== getBrowserTimeZone();
-}
-
 export interface WallClock {
   year: number;
   /** 1-12 */
@@ -134,6 +129,24 @@ export function getWallClock(date: Date, timeZone: string): WallClock {
   };
 }
 
+/**
+ * A JMAP LocalDateTime ("YYYY-MM-DDTHH:mm:ss") for a date-time string, as the
+ * wall clock in `timeZone` (UTC when unset). Strings that already carry no
+ * zone are returned as they are; one with `Z` or an offset is converted.
+ *
+ * CalendarEvent/query reads `after`/`before` as LocalDateTime in the request's
+ * timeZone, and Stalwart silently drops a `Z` or offset instead of honouring
+ * it, which shifted every UTC range by the user's offset.
+ */
+export function toLocalDateTime(value: string, timeZone?: string): string {
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return value;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const w = getWallClock(date, timeZone || "UTC");
+  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
+  return `${pad(w.year, 4)}-${pad(w.month)}-${pad(w.day)}T${pad(w.hour)}:${pad(w.minute)}:${pad(w.second)}`;
+}
+
 /** UTC offset of `timeZone` at the given instant, in milliseconds (east = positive). */
 export function getTimeZoneOffsetMs(date: Date, timeZone: string): number {
   const w = getWallClock(date, timeZone);
@@ -172,6 +185,20 @@ export function fromZonedDisplayDate(wall: Date, timeZone: string): Date {
     wall.getFullYear(), wall.getMonth(), wall.getDate(),
     wall.getHours(), wall.getMinutes(), wall.getSeconds(), wall.getMilliseconds(),
   );
+  const guess = asUtc - getTimeZoneOffsetMs(new Date(asUtc), timeZone);
+  return new Date(asUtc - getTimeZoneOffsetMs(new Date(guess), timeZone));
+}
+
+/**
+ * The instant at which the clock in `timeZone` reads `w`. Unlike
+ * fromZonedDisplayDate it never goes through a Date's local fields, so a
+ * time that the browser's own zone skips at a DST change is not shifted.
+ */
+export function fromWallClock(w: WallClock, timeZone: string): Date {
+  const d = new Date(0);
+  d.setUTCFullYear(w.year, w.month - 1, w.day);
+  d.setUTCHours(w.hour, w.minute, w.second, 0);
+  const asUtc = d.getTime();
   const guess = asUtc - getTimeZoneOffsetMs(new Date(asUtc), timeZone);
   return new Date(asUtc - getTimeZoneOffsetMs(new Date(guess), timeZone));
 }

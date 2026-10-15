@@ -12,19 +12,48 @@ import { wopiContext } from '@/lib/wopi/request';
  * cookie on these requests.
  */
 
+/**
+ * ONLYOFFICE treats a document the user may not edit as forced into view
+ * mode and warns about it ("Error code: -103" on 9.1), even when the document
+ * was opened through the view action. UserCanReview keeps it off that path,
+ * and with SupportsReviewing false it grants nothing (#1187).
+ */
+const VIEW_ONLY_INFO = { UserCanReview: true, SupportsReviewing: false };
+
 /** GET = CheckFileInfo */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ fileId: string }> },
 ) {
   try {
-    const { fileId } = await params;
-    const auth = await wopiContext(request, fileId);
+    const { fileId: documentId } = await params;
+    const auth = await wopiContext(request, documentId);
     if (!auth) {
       return NextResponse.json({ error: 'Invalid access token' }, { status: 401 });
     }
 
-    const node = await getWopiFileNode(auth.ctx, auth.payload.accountId, fileId);
+    const { payload } = auth;
+    if (payload.kind === 'attachment') {
+      // Mail attachments open read-only (#1047): the blob is immutable, so
+      // its id doubles as the version and there is nothing to save back to.
+      return NextResponse.json({
+        BaseFileName: payload.name || 'attachment',
+        Size: payload.size ?? 0,
+        OwnerId: payload.username,
+        UserId: payload.username,
+        UserFriendlyName: payload.username,
+        UserCanWrite: false,
+        ReadOnly: true,
+        UserCanNotWriteRelative: true,
+        SupportsUpdate: false,
+        SupportsLocks: false,
+        ...VIEW_ONLY_INFO,
+        Version: payload.fileId,
+        PostMessageOrigin: payload.postMessageOrigin || payload.origin,
+      });
+    }
+
+    const node = await getWopiFileNode(auth.ctx, payload.accountId, payload.fileId);
     if (!node || !node.blobId) {
       return NextResponse.json({ error: 'File not found' }, { status: 404 });
     }
@@ -39,9 +68,10 @@ export async function GET(
       UserCanNotWriteRelative: true,
       SupportsUpdate: true,
       SupportsLocks: false,
+      ...(auth.payload.canWrite ? {} : VIEW_ONLY_INFO),
       LastModifiedTime: node.modified,
       Version: node.blobId,
-      PostMessageOrigin: auth.payload.origin,
+      PostMessageOrigin: auth.payload.postMessageOrigin || auth.payload.origin,
     });
   } catch (error) {
     logger.error('WOPI CheckFileInfo failed', {
@@ -62,8 +92,8 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ fileId: string }> },
 ) {
-  const { fileId } = await params;
-  const auth = await wopiContext(request, fileId);
+  const { fileId: documentId } = await params;
+  const auth = await wopiContext(request, documentId);
   if (!auth) {
     return NextResponse.json({ error: 'Invalid access token' }, { status: 401 });
   }

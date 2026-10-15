@@ -2,12 +2,14 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslations } from 'next-intl';
-import { X, Mail, Pencil, Trash2, Plus, AlertTriangle, Star } from 'lucide-react';
+import { X, Mail, Pencil, Trash2, Plus, AlertTriangle, Star } from '@/components/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { IdentityForm } from './identity-form';
-import { useIdentityStore } from '@/stores/identity-store';
+import {
+  useIdentityStore, createIdentityWithHooks, updateIdentityWithHooks, deleteIdentityWithHooks,
+} from '@/stores/identity-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { useAccountStore } from '@/stores/account-store';
 import { useSettingsStore } from '@/stores/settings-store';
@@ -24,6 +26,7 @@ import type { Identity, EmailAddress } from '@/lib/jmap/types';
 import { toast } from '@/stores/toast-store';
 import { useFocusTrap } from '@/hooks/use-focus-trap';
 import { useConfirmDialog } from '@/hooks/use-confirm-dialog';
+import { toUnicodeEmail } from '@/lib/idn';
 
 function emailMatchesUsername(email: string, username: string): boolean {
   if (email === username) return true;
@@ -136,14 +139,7 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
     if (!client) return;
 
     try {
-      await client.createIdentity(
-        data.name,
-        data.email,
-        data.replyTo,
-        data.bcc,
-        data.textSignature,
-        data.htmlSignature
-      );
+      if (!(await createIdentityWithHooks(client, data))) return;
 
       await refreshIdentities();
       setIsCreating(false);
@@ -159,13 +155,14 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
     if (!client) return;
 
     try {
-      await client.updateIdentity(identity.id, {
+      const saved = await updateIdentityWithHooks(client, identity, {
         name: data.name,
         replyTo: data.replyTo,
         bcc: data.bcc,
         textSignature: data.textSignature,
         htmlSignature: data.htmlSignature,
       });
+      if (!saved) return;
 
       await refreshIdentities();
       setEditingId(null);
@@ -195,7 +192,7 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
     setDeletingId(identity.id);
 
     try {
-      await client.deleteIdentity(identity.id);
+      if (!(await deleteIdentityWithHooks(client, identity))) return;
       await refreshIdentities();
       toast.success(tNotif('identity_deleted'));
     } catch (error) {
@@ -315,19 +312,19 @@ export function IdentityManagerModal({ isOpen, onClose }: IdentityManagerModalPr
                           )}
                         </div>
                         <p className="text-sm text-muted-foreground truncate">
-                          {identity.email}
+                          {toUnicodeEmail(identity.email)}
                         </p>
 
                         {/* Additional Info */}
                         <div className="mt-2 space-y-1 text-xs text-muted-foreground">
                           {identity.replyTo && identity.replyTo.length > 0 && (
                             <p>
-                              {t('display.reply_to')} {identity.replyTo.map((a) => a.email).join(', ')}
+                              {t('display.reply_to')} {identity.replyTo.map((a) => toUnicodeEmail(a.email)).join(', ')}
                             </p>
                           )}
                           {identity.bcc && identity.bcc.length > 0 && (
                             <p>
-                              {t('display.bcc')} {identity.bcc.map((a) => a.email).join(', ')}
+                              {t('display.bcc')} {identity.bcc.map((a) => toUnicodeEmail(a.email)).join(', ')}
                             </p>
                           )}
                           {identity.textSignature && (

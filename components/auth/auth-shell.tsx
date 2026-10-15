@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
 import { useShallow } from "zustand/react/shallow";
-import { Sun, Moon, Monitor, Check } from "lucide-react";
+import { Sun, Moon, Monitor, Check } from "@/components/icons";
 import { apiFetch, withBasePath } from "@/lib/browser-navigation";
 import { useThemeStore } from "@/stores/theme-store";
 import { useMenuNavigation } from "@/hooks/use-menu-navigation";

@@ -1,7 +1,4 @@
-export interface EmailHeader {
-  name: string;
-  value: string;
-}
+
 
 /**
  * A session-visible account (the user's own primary account plus any
@@ -118,6 +115,18 @@ export interface SendEmailResult {
    * old draft). The mail left the server - callers should warn, not fail.
    */
   filingError?: string;
+  /**
+   * Recipients the server refused while accepting the submission (its
+   * deliveryStatus says delivered "no"). The message went out to the others
+   * only - callers should name these instead of reporting a plain success.
+   */
+  rejectedRecipients?: RejectedRecipient[];
+}
+
+/** A recipient refused at submission, with the SMTP reply the server gave. */
+export interface RejectedRecipient {
+  email: string;
+  smtpReply: string;
 }
 
 export interface ScheduledEmail extends Email {
@@ -151,6 +160,15 @@ export interface AuthenticationResults {
     result: 'pass' | 'fail' | 'policy' | 'neutral' | 'temperror' | 'permerror';
     domain?: string;
     selector?: string;
+    /**
+     * Every DKIM result when the message carried more than one signature;
+     * `result` above is the first.
+     */
+    all?: Array<{
+      result: 'pass' | 'fail' | 'policy' | 'neutral' | 'temperror' | 'permerror';
+      domain?: string;
+      selector?: string;
+    }>;
   };
   dmarc?: {
     result: 'pass' | 'fail' | 'none';
@@ -243,7 +261,8 @@ export interface Thread {
 
 // Thread grouping for UI display
 export interface ThreadGroup {
-  threadId: string;
+  threadId: string;          // JMAP thread id - unique only within its account; use for Thread/get
+  threadKey: string;         // Client-side identity, unique across accounts (see threadKeyFor)
   emails: Email[];           // Emails in this thread (sorted by receivedAt desc)
   latestEmail: Email;        // Most recent email
   participantNames: string[];// Unique participant names
@@ -311,6 +330,11 @@ export interface ContactCard {
     grammaticalGender?: string;
     pronouns?: Record<string, { pronouns: string; pref?: number; contexts?: Record<string, boolean> }>;
   };
+  calendars?: Record<string, { uri: string; kind?: 'calendar' | 'freeBusy'; mediaType?: string; contexts?: Record<string, boolean> }>;
+  schedulingAddresses?: Record<string, { uri: string; contexts?: Record<string, boolean>; pref?: number }>;
+  // Client-side flat views of `calendars`, `schedulingAddresses` and the
+  // `directories` entry (vCard CALURI / FBURL / CALADRURI / SOURCE). They are
+  // not RFC 9553 properties; lib/jmap/contact-wire.ts maps them.
   calendarUri?: string;
   schedulingUri?: string;
   freeBusyUri?: string;
@@ -792,7 +816,7 @@ export interface CalendarTask {
   timeZone: string | null;
   showWithoutTime: boolean;
   progress: 'needs-action' | 'in-process' | 'completed' | 'cancelled';
-  progressUpdated: string | null;
+  progressUpdated?: string | null;
   priority: number;
   privacy: 'public' | 'private' | 'secret';
   keywords: Record<string, boolean> | null;
@@ -803,6 +827,11 @@ export interface CalendarTask {
   recurrenceRules: CalendarRecurrenceRule[] | null;
   alerts: Record<string, CalendarEventAlert> | null;
   relatedTo: Record<string, CalendarRelation> | null;
+  // Client-only, set on tasks from a shared calendar account. Their `id` and
+  // `calendarIds` are namespaced `accountId:id` like shared events.
+  originalId?: string;
+  accountId?: string;
+  isShared?: boolean;
 }
 
 /**
@@ -1048,8 +1077,10 @@ export function isCrossViewId(id: string): boolean {
 
 /**
  * Mailbox roles excluded from the cross-account views. Everything else (inbox
- * and custom/no-role folders) is included.
+ * and custom/no-role folders) is included. `all` (RFC 6154 \All) holds every
+ * message, so including it would bring back sent/archive mail and count inbox
+ * unread twice.
  */
 export const CROSS_EXCLUDED_ROLES: ReadonlySet<string> = new Set([
-  'junk', 'sent', 'archive', 'trash', 'drafts',
+  'junk', 'sent', 'archive', 'trash', 'drafts', 'all',
 ]);

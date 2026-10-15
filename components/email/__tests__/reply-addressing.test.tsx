@@ -1,14 +1,21 @@
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { EmailComposer } from '../email-composer';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useAuthStore } from '@/stores/auth-store';
+import { useAccountStore } from '@/stores/account-store';
+import { usePolicyStore } from '@/stores/policy-store';
 
 // ─── Heavy component mocks (mirrors recipient-paste.test.tsx) ─────────────────
 
+const editorProps = vi.hoisted(() => ({ mentionCandidates: [] as Array<{ label: string; email: string }> }));
+
 vi.mock('@/components/email/rich-text-editor', () => ({
-  RichTextEditor: () => React.createElement('div', { 'data-testid': 'rich-text-editor' }),
+  RichTextEditor: (props: { mentionCandidates?: Array<{ label: string; email: string }> }) => {
+    editorProps.mentionCandidates = props.mentionCandidates ?? [];
+    return React.createElement('div', { 'data-testid': 'rich-text-editor' });
+  },
 }));
 
 vi.mock('@/components/plugins/plugin-slot', () => ({ PluginSlot: () => null }));
@@ -76,7 +83,10 @@ vi.mock('@/stores/identity-store', () => {
 });
 
 vi.mock('@/stores/account-store', () => {
-  const state = { accounts: [], getAccountById: () => undefined };
+  const state = {
+    accounts: [] as { id: string; email: string; isConnected: boolean }[],
+    getAccountById: (id: string) => state.accounts.find((a) => a.id === id),
+  };
   const hook = (sel?: (s: typeof state) => unknown) =>
     typeof sel === 'function' ? sel(state) : state;
   hook.getState = () => state;
@@ -104,6 +114,7 @@ vi.mock('@/stores/settings-store', () => {
     autoSelectReplyIdentity: false,
     replyIdentityMatch: 'domain',
     attachmentReminderEnabled: false,
+    recipientMentionsEnabled: true,
     attachmentReminderKeywords: [],
     sendDelaySeconds: 0,
     signaturePosition: 'above_quote',
@@ -148,6 +159,14 @@ vi.mock('@/stores/toast-store', () => ({
 }));
 
 vi.mock('@/lib/plugin-hooks', () => ({
+  identityHooks: {
+    onSignatureRender: { size: 0, transform: async (value: unknown) => value },
+    onIdentitySelect: { size: 0, emit: async () => {} },
+  },
+  templateHooks: {
+    onTemplateRender: { size: 0, transform: async (value: unknown) => value },
+    onTemplateApply: { size: 0, emit: async () => {} },
+  },
   emailHooks: {
     onComposerOpen: { call: async () => [] },
     onRecipientChange: { call: async () => [] },
@@ -339,6 +358,24 @@ describe('composer reply addressing', () => {
     }
   });
 
+  // The admin's custom From gate takes the rewrite away even when the user
+  // asked for domain matching.
+  it('does not rewrite From when the admin turned custom From off', () => {
+    const setCustomFrom = (on: boolean) => usePolicyStore.setState((state) => ({
+      policy: { ...state.policy, features: { ...state.policy.features, customFromEnabled: on } },
+    }));
+    setAutoSelect(true);
+    setCustomFrom(false);
+    try {
+      render(<EmailComposer mode="reply" replyTo={RECEIVED_CATCH_ALL} />);
+      expect(screen.queryByDisplayValue('colleague@example.com')).toBeNull();
+      expect(identitySelect().value).toBe('id-me');
+    } finally {
+      setAutoSelect(false);
+      setCustomFrom(true);
+    }
+  });
+
   it('never rewrites From on a forward, even with the setting on', () => {
     setAutoSelect(true);
     try {
@@ -378,5 +415,109 @@ describe('composer reply addressing', () => {
       proIdentities.enabled = false;
       proIdentities.allIdentities = [];
     }
+  });
+
+  // #1104: a message opened from the Unified Inbox, or from a non-active
+  // account's folders, arrived on another connected account. Its blobIds and
+  // thread live there, so that account's identities are the ones to use.
+  describe('message held by another connected account', () => {
+    const accountStore = useAccountStore as unknown as { setState: (p: Record<string, unknown>) => void };
+    const ALL = [
+      { id: 'local-1::id-me', email: 'me@example.com', name: 'Me' },
+      { id: 'local-1::id-info', email: 'info@example.com', name: 'Info' },
+      { id: 'local-2::id-login', email: 'login@elsewhere.net', name: 'Login' },
+      { id: 'local-2::id-alias', email: 'alias@elsewhere.net', name: 'Alias' },
+    ];
+    const TO_ALIAS = {
+      from: [{ email: 'bob@other.com', name: 'Bob' }],
+      to: [{ email: 'alias@elsewhere.net' }],
+      subject: 'Hi',
+    };
+    const TO_LIST = {
+      from: [{ email: 'bob@other.com', name: 'Bob' }],
+      to: [{ email: 'list@lists.example.org' }],
+      subject: 'Newsletter',
+    };
+
+    beforeEach(() => {
+      proIdentities.enabled = true;
+      proIdentities.allIdentities = ALL;
+      (useAuthStore as unknown as { setState: (p: Record<string, unknown>) => void })
+        .setState({ activeAccountId: 'local-1' });
+      // The active login's address is not its default identity (#507).
+      accountStore.setState({
+        accounts: [
+          { id: 'local-1', email: 'info@example.com', isConnected: true },
+          { id: 'local-2', email: 'login@elsewhere.net', isConnected: true },
+        ],
+      });
+    });
+
+    afterEach(() => {
+      proIdentities.enabled = false;
+      proIdentities.allIdentities = [];
+      accountStore.setState({ accounts: [] });
+    });
+
+    it('replies from the address on that account that received it', () => {
+      render(<EmailComposer mode="reply" replyTo={{ ...TO_ALIAS, accountId: 'local-2' }} />);
+      expect(identitySelect().value).toBe('local-2::id-alias');
+    });
+
+    it('forwards from that account when none of its addresses received it', () => {
+      render(<EmailComposer mode="forward" replyTo={{ ...TO_LIST, accountId: 'local-2' }} />);
+      expect(identitySelect().value).toBe('local-2::id-login');
+    });
+
+    it('waits for that account\'s identities instead of keeping the default', () => {
+      proIdentities.allIdentities = ALL.filter((i) => i.id.startsWith('local-1::'));
+      const replyTo = { ...TO_ALIAS, accountId: 'local-2' };
+      const { rerender } = render(<EmailComposer mode="reply" replyTo={replyTo} />);
+      proIdentities.allIdentities = ALL;
+      rerender(<EmailComposer mode="reply" replyTo={replyTo} />);
+      expect(identitySelect().value).toBe('local-2::id-alias');
+    });
+
+    it('keeps the default identity for a message on the active account', () => {
+      render(<EmailComposer mode="reply" replyTo={{ ...TO_LIST, accountId: 'local-1' }} />);
+      expect(identitySelect().value).toBe('local-1::id-me');
+    });
+
+    // A shared folder's messages carry the owner's JMAP id, not a login.
+    it('resolves on the active account when the id is not a connected login', () => {
+      render(<EmailComposer mode="reply" replyTo={{ ...TO_ALIAS, to: [{ email: 'info@example.com' }], accountId: 'owner-jmap-id' }} />);
+      expect(identitySelect().value).toBe('local-1::id-info');
+    });
+  });
+});
+
+describe('composer @-mention candidates', () => {
+  const offered = () => editorProps.mentionCandidates.map((c) => `${c.label} <${c.email}>`);
+
+  it('offers everyone a reply-all addresses, by first name', () => {
+    render(<EmailComposer mode="replyAll" replyTo={RECEIVED} />);
+    expect(offered()).toEqual(['Bob <bob@other.com>', 'Carol <carol@other.com>', 'Dave <dave@other.com>']);
+  });
+
+  // Naming a blind-copied recipient in the text would disclose them.
+  it('never offers Bcc recipients', () => {
+    render(
+      <EmailComposer
+        initialData={{
+          to: 'Max Mustermann <max.mustermann@example.com>',
+          cc: 'eva.weber@example.com',
+          bcc: 'Geheim <geheim@example.com>',
+          subject: '',
+          body: '',
+          showCc: true,
+          showBcc: true,
+          selectedIdentityId: null,
+          subAddressTag: '',
+          mode: 'compose',
+          draftId: null,
+        }}
+      />
+    );
+    expect(offered()).toEqual(['Max <max.mustermann@example.com>', 'Eva <eva.weber@example.com>']);
   });
 });

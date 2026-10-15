@@ -11,6 +11,8 @@ import { resolveComposeAccountEmail } from "@/lib/reply-identity";
 import { toast } from "@/stores/toast-store";
 import { useProTabStore, registerProTabCloseInterceptor, type ProComposeTabData } from "@/stores/pro-tab-store";
 import { debug } from "@/lib/debug";
+import { threadKeyFor } from "@/lib/thread-utils";
+import { announceSent } from "@/lib/plugin-after-send";
 
 interface ProComposeTabBodyProps {
   tabId: string;
@@ -88,6 +90,7 @@ export function ProComposeTabBody({ tabId, data }: ProComposeTabBodyProps) {
         { localAccountId: sendData.localAccountId },
       );
       submitted = true;
+      announceSent(result, sendData);
 
       if (result.scheduled) {
         await handleScheduledSendCreated();
@@ -118,13 +121,13 @@ export function ProComposeTabBody({ tabId, data }: ProComposeTabBodyProps) {
       if (data.sourceEmailId) {
         const emailState = useEmailStore.getState();
         const repliedEmail = emailState.emails.find(e => e.id === data.sourceEmailId);
-        if (repliedEmail?.threadId && emailState.expandedThreadIds.has(repliedEmail.threadId)) {
+        if (repliedEmail?.threadId && emailState.expandedThreadIds.has(threadKeyFor(repliedEmail))) {
           const accountId = client.getAccountId();
           const fullEmails = await client.getThreadEmails(repliedEmail.threadId, accountId);
           if (fullEmails.length > 0) {
             useEmailStore.setState((state) => {
               const c = new Map(state.threadEmailsCache);
-              c.set(repliedEmail.threadId!, fullEmails);
+              c.set(threadKeyFor(repliedEmail), fullEmails);
               return { threadEmailsCache: c };
             });
           }
@@ -216,6 +219,9 @@ export function ProComposeTabBody({ tabId, data }: ProComposeTabBodyProps) {
           replyTo={data.replyTo}
           initialDraftText={data.initialDraftText}
           initialData={data.initialData}
+          prefill={data.prefill}
+          sessionKey={`pro-${tabId}-${data.sessionId}`}
+          sourceEmailId={data.sourceEmailId ?? undefined}
           composeFromAccountEmail={composeFromAccountEmail}
           onSend={handleSend}
           onScheduledSendCreated={handleScheduledSendCreated}

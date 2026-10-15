@@ -3,6 +3,8 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 // Mock the environment variable
 beforeAll(() => {
   vi.stubEnv('DEV_MOCK_JMAP', 'true');
+  // Inlined from DEV_MOCK_JMAP at build time in a real build.
+  vi.stubEnv('NEXT_PUBLIC_DEV_MOCK_JMAP', 'true');
 });
 
 // We test via dynamic import to get a fresh module with env set
@@ -85,6 +87,28 @@ describe('dev-jmap mock server', () => {
       expect(data.methodResponses[0][1].list.length).toBeGreaterThan(0);
       const inbox = data.methodResponses[0][1].list.find((m: { role: string }) => m.role === 'inbox');
       expect(inbox).toBeDefined();
+    });
+  });
+
+  describe('POST /api - back-references', () => {
+    it('resolves a wildcard path across a list (RFC 8620 §3.7)', async () => {
+      const req = makeRequest('http://localhost:3000/api/dev-jmap/api', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', host: 'localhost:3000' },
+        body: JSON.stringify({
+          methodCalls: [
+            ['Email/query', { accountId: 'dev-account-001', filter: { inMailbox: 'mb-inbox' }, limit: 3 }, '0'],
+            ['Email/get', { accountId: 'dev-account-001', '#ids': { resultOf: '0', name: 'Email/query', path: '/ids' }, properties: ['threadId'] }, '1'],
+            ['Thread/get', { accountId: 'dev-account-001', '#ids': { resultOf: '1', name: 'Email/get', path: '/list/*/threadId' } }, '2'],
+          ],
+        }),
+      });
+      const res = await POST(req, { params: Promise.resolve({ path: ['api'] }) });
+      const data = await res.json();
+      const threadIds = data.methodResponses[1][1].list.map((e: { threadId: string }) => e.threadId);
+      expect(threadIds.length).toBeGreaterThan(0);
+      expect(data.methodResponses[2][0]).toBe('Thread/get');
+      expect(data.methodResponses[2][1].list.map((t: { id: string }) => t.id).sort()).toEqual([...new Set<string>(threadIds)].sort());
     });
   });
 
@@ -367,5 +391,23 @@ describe('dev-jmap mock server', () => {
       expect(data.blobId).toBeDefined();
       expect(data.type).toBe('image/png');
     });
+  });
+});
+
+// The mock accepts any password; a build made without DEV_MOCK_JMAP (every
+// release image) must not be able to switch it on at runtime.
+describe('dev-jmap mock in a build made without it', () => {
+  it('stays off even when DEV_MOCK_JMAP is set at runtime', async () => {
+    vi.stubEnv('NEXT_PUBLIC_DEV_MOCK_JMAP', '');
+    try {
+      const { GET } = await loadRoute();
+      const req = makeRequest('http://localhost:3000/api/dev-jmap/.well-known/jmap', {
+        headers: { host: 'localhost:3000' },
+      });
+      const res = await GET(req as never, { params: Promise.resolve({ path: ['.well-known', 'jmap'] }) });
+      expect(res.status).toBe(404);
+    } finally {
+      vi.stubEnv('NEXT_PUBLIC_DEV_MOCK_JMAP', 'true');
+    }
   });
 });

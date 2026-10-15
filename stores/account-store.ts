@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateAccountId, generateAvatarColor, getMaxAccounts } from '@/lib/account-utils';
+import { authHooks } from '@/lib/plugin-hooks';
 
 export interface AccountEntry {
   /** Unique key: `${username}@${serverHostname}` */
@@ -11,12 +12,22 @@ export interface AccountEntry {
   serverUrl: string;
   /** Username / email used to authenticate */
   username: string;
-  /** Authentication mode */
-  authMode: 'basic' | 'oauth';
+  /**
+   * Authentication mode: a password (Basic), OAuth/SSO tokens that renew, or
+   * an access token the user pasted (Bearer, no renewal).
+   */
+  authMode: 'basic' | 'oauth' | 'token';
   /** Cookie slot index for session/token cookies (0 ≤ slot < MAX_ACCOUNT_SLOTS) */
   cookieSlot: number;
-  /** Whether "Remember Me" was checked (basic auth only) */
+  /** Whether "Remember Me" was checked (password and access-token logins) */
   rememberMe: boolean;
+  /**
+   * Signed in through the identity provider's own login (OAuth code or SSO
+   * flow), so the provider may hold a login session that signing out should
+   * end too (#905). A password login, even one upgraded to OAuth tokens, has
+   * none. `undefined` = signed in before this was recorded.
+   */
+  providerSession?: boolean;
   /**
    * Server-confirmed account identifiers captured at login: the account-id form
    * ({@link generateAccountId}) of the JMAP Session.username and the primary
@@ -39,6 +50,11 @@ export interface AccountEntry {
   errorMessage?: string;
   /** Whether this is the default account (loaded on app start) */
   isDefault: boolean;
+  /**
+   * Brought back from the account list backup and not signed in on this
+   * device yet. Kept across reloads, and opening it leads to the sign-in form.
+   */
+  awaitingSignIn?: boolean;
 }
 
 interface AccountState {
@@ -83,6 +99,8 @@ export const useAccountStore = create<AccountState>()(
                     errorMessage: undefined,
                     lastLoginAt: entry.lastLoginAt,
                     authMode: entry.authMode,
+                    // Any sign-in ends the wait, whichever way it went.
+                    awaitingSignIn: entry.awaitingSignIn,
                   }
                 : a
             ),
@@ -113,11 +131,13 @@ export const useAccountStore = create<AccountState>()(
           activeAccountId: s.activeAccountId ?? id,
           defaultAccountId: isDefault ? id : s.defaultAccountId,
         }));
+        void authHooks.onAccountAdd.emit({ accountId: id });
 
         return id;
       },
 
       removeAccount: (accountId) => {
+        if (!get().accounts.some((a) => a.id === accountId)) return;
         set((s) => {
           const remaining = s.accounts.filter((a) => a.id !== accountId);
           const wasDefault = s.defaultAccountId === accountId;
@@ -141,6 +161,7 @@ export const useAccountStore = create<AccountState>()(
             defaultAccountId: newDefault,
           };
         });
+        void authHooks.onAccountRemove.emit({ accountId });
       },
 
       setActiveAccount: (accountId) => {
@@ -244,3 +265,38 @@ export const useAccountStore = create<AccountState>()(
     }
   )
 );
+
+/**
+ * Resolves once the login `accountId` is connected, or with `false` when it
+ * never will be: not one of this browser's logins, its restore failed, or
+ * `timeoutMs` went by.
+ *
+ * A link can arrive while the browser is still reconnecting its logins - a
+ * notification tapped with the app closed does exactly that - and they come
+ * back one at a time, so the mailbox a link names is often not connected yet
+ * when the link is read. Treating "not yet" as "unavailable" sent the user to
+ * the wrong mailbox with an error; this waits for the login instead.
+ */
+export function waitForConnectedAccount(accountId: string, timeoutMs = 20_000): Promise<boolean> {
+  const settled = (account: AccountEntry | undefined): boolean | null => {
+    if (!account) return false;
+    if (account.isConnected) return true;
+    if (account.hasError) return false;
+    return null;
+  };
+  const now = settled(useAccountStore.getState().accounts.find((a) => a.id === accountId));
+  if (now !== null) return Promise.resolve(now);
+
+  return new Promise((resolve) => {
+    const finish = (value: boolean) => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    const unsubscribe = useAccountStore.subscribe((state) => {
+      const result = settled(state.accounts.find((a) => a.id === accountId));
+      if (result !== null) finish(result);
+    });
+  });
+}

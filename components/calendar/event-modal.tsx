@@ -2,12 +2,15 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useTranslations, useLocale } from "next-intl";
+import { toast } from "@/stores/toast-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { LinkifiedText } from "@/components/ui/linkified-text";
-import { X, Trash2, Check, Users, CalendarDays, Copy, Pencil, Clock, MapPin, Video, Repeat, Bell, AlignLeft, Plus } from "lucide-react";
-import { format, parseISO, addHours, addDays, isSameDay } from "date-fns";
+import { X, Trash2, Check, Users, CalendarDays, Copy, Pencil, Clock, MapPin, Video, Repeat, Bell, AlignLeft } from "@/components/icons";
+import { format, parseISO, addHours, isSameDay } from "date-fns";
 import type { CalendarEvent, Calendar, CalendarParticipant, CalendarEventAlert, CalendarRecurrenceRule } from "@/lib/jmap/types";
+import { AlertListEditor, AlertSummary, formatEventAlertsLabel } from "./alert-list-editor";
+import { alertsToRows, getCalendarDefaultAlerts, rowsToAlerts, type AlertRow } from "@/lib/calendar-alerts";
 import { RecurrenceEditor, buildRecurrenceSummary, isSimpleRecurrenceRule } from "./recurrence-editor";
 import { parseDuration, getEventColor } from "./event-card";
 import { buildAllDayDuration, getEventDisplayEndDate, getEventEndDate, getEventStartDate, getPrimaryCalendarId } from "@/lib/calendar-utils";
@@ -23,14 +26,21 @@ import {
   getStatusCounts,
   buildParticipantMap,
 } from "@/lib/calendar-participants";
-import { getEventEditability, canCreateEventsIn } from "@/lib/calendar-editability";
+import { canUserRsvp, getEventEditability, canCreateEventsIn } from "@/lib/calendar-editability";
 import { PluginSlot } from "@/components/plugins/plugin-slot";
 import { useSettingsStore } from "@/stores/settings-store";
 import { generateUUID } from "@/lib/utils";
+import { buildDuplicateEventData } from "@/lib/calendar-duplicate";
 import { useFormatEventDate } from "@/hooks/use-format-event-date";
 import { useIsPaneScoped } from "@/hooks/use-pane-context";
-import { calendarHooks } from "@/lib/plugin-hooks";
-import type { ConflictWarning } from "@/lib/plugin-types";
+import { useContactNameResolver } from "@/hooks/use-contact-name-resolver";
+import {
+  calendarFormHooks,
+  calendarHooks,
+  type CalendarEventFormSavePatch,
+} from "@/lib/plugin-hooks";
+import type { CalendarEventView, ConflictWarning } from "@/lib/plugin-types";
+import { eventToView } from "@/lib/plugin-projection";
 
 export interface PendingEventPreview {
   start: Date;
@@ -46,6 +56,10 @@ interface EventModalProps {
   defaultDate?: Date;
   defaultEndDate?: Date;
   defaultAllDay?: boolean;
+  /** Open an existing event straight in the form instead of its summary. */
+  startInEditMode?: boolean;
+  /** Title to start a new event with (from the quick editor's "More options"). */
+  defaultTitle?: string;
   defaultCalendarId?: string;
   onSave: (data: Partial<CalendarEvent>, sendSchedulingMessages?: boolean) => void | Promise<void>;
   onDelete?: (id: string, sendSchedulingMessages?: boolean) => void;
@@ -98,84 +112,12 @@ function buildDuration(startDate: Date, endDate: Date): string {
 
 type RecurrenceOption = "none" | "daily" | "weekly" | "monthly" | "yearly" | "custom";
 
-type AlertUnit = "at_time" | "minutes" | "hours" | "days" | "weeks";
-
-interface AlertRow {
-  id: string;
-  value: number;
-  unit: AlertUnit;
-}
-
-let alertRowSeq = 0;
-function newAlertRow(value: number, unit: AlertUnit): AlertRow {
-  alertRowSeq += 1;
-  return { id: `r${alertRowSeq}`, value, unit };
-}
-
-function alertRowToOffset(row: AlertRow): string | null {
-  if (row.unit === "at_time") return "PT0S";
-  const v = Math.max(0, Math.floor(row.value));
-  if (!Number.isFinite(v) || v <= 0) return null;
-  switch (row.unit) {
-    case "minutes": return `-PT${v}M`;
-    case "hours": return `-PT${v}H`;
-    case "days": return `-P${v}D`;
-    case "weeks": return `-P${v}W`;
-  }
-}
-
-function offsetToAlertRow(offset: string): AlertRow | null {
-  if (offset === "PT0S" || offset === "P0D" || offset === "PT0M") {
-    return newAlertRow(0, "at_time");
-  }
-  let m = offset.match(/^-?P(\d+)W$/);
-  if (m) return newAlertRow(parseInt(m[1], 10), "weeks");
-  m = offset.match(/^-?P(\d+)D$/);
-  if (m) return newAlertRow(parseInt(m[1], 10), "days");
-  m = offset.match(/^-?PT(\d+)H$/);
-  if (m) return newAlertRow(parseInt(m[1], 10), "hours");
-  m = offset.match(/^-?PT(\d+)M$/);
-  if (m) {
-    const mins = parseInt(m[1], 10);
-    if (mins > 0 && mins % 1440 === 0) return newAlertRow(mins / 1440, "days");
-    if (mins > 0 && mins % 60 === 0) return newAlertRow(mins / 60, "hours");
-    return newAlertRow(mins, "minutes");
-  }
-  return null;
-}
-
-function formatAlertRowLabel(
-  row: { value: number; unit: AlertUnit },
-  t: ReturnType<typeof useTranslations>
-): string {
-  if (row.unit === "at_time") return t("alerts.at_time");
-  switch (row.unit) {
-    case "minutes": return t("alerts.minutes_before", { count: row.value });
-    case "hours": return t("alerts.hours_before", { count: row.value });
-    case "days": return t("alerts.days_before", { count: row.value });
-    case "weeks": return t("alerts.weeks_before", { count: row.value });
-  }
-}
-
 function formatDurationDisplay(minutes: number): string {
   if (minutes < 60) return `${minutes}min`;
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   if (m === 0) return `${h}h`;
   return `${h}h${m}min`;
-}
-
-function getAlertLabel(event: CalendarEvent, t: ReturnType<typeof useTranslations>): string | null {
-  if (!event.alerts) return null;
-  const labels: string[] = [];
-  for (const alert of Object.values(event.alerts)) {
-    if (alert.trigger["@type"] !== "OffsetTrigger") continue;
-    const row = offsetToAlertRow(alert.trigger.offset);
-    if (!row) continue;
-    labels.push(formatAlertRowLabel(row, t));
-  }
-  if (labels.length === 0) return null;
-  return labels.join(", ");
 }
 
 function getRecurrenceLabel(event: CalendarEvent, t: ReturnType<typeof useTranslations>, locale: string): string | null {
@@ -189,6 +131,8 @@ export function EventModal({
   defaultDate,
   defaultEndDate,
   defaultAllDay,
+  defaultTitle,
+  startInEditMode,
   defaultCalendarId,
   onSave,
   onDelete,
@@ -214,7 +158,7 @@ export function EventModal({
     : "fixed inset-0 z-50 flex flex-col bg-background";
   const isEdit = !!event;
   const formatEventDate = useFormatEventDate();
-  const [mode, setMode] = useState<"view" | "edit">(isEdit ? "view" : "edit");
+  const [mode, setMode] = useState<"view" | "edit">(isEdit && !startInEditMode ? "view" : "edit");
 
   const userIsOrganizer = useMemo(() => {
     if (!event) return true;
@@ -235,6 +179,21 @@ export function EventModal({
   const canEditBody = editability === "editable";
   const rsvpMode = editability === "rsvp-only";
 
+  // A received invite lands in the user's own calendar, resolves to 'editable',
+  // and so never reaches the rsvp-only view below.
+  const canRsvp = useMemo(() => {
+    if (!event) return false;
+    return canUserRsvp(event, {
+      calendarsById: new Map(calendars.map((c) => [c.id, c])),
+      userCalendarAddresses: currentUserEmails,
+      isSubscriptionCalendar: isSubscriptionCalendar ?? (() => false),
+    });
+  }, [event, calendars, currentUserEmails, isSubscriptionCalendar]);
+
+  // Bare addresses (the organizer above all — Stalwart drops its display name)
+  // render with the contact card's name instead of the raw email.
+  const resolveContactName = useContactNameResolver();
+
   const userParticipantId = useMemo(() => {
     if (!event) return null;
     return getUserParticipantId(event, currentUserEmails);
@@ -247,8 +206,8 @@ export function EventModal({
 
   const existingParticipants = useMemo(() => {
     if (!event) return [];
-    return getParticipantList(event);
-  }, [event]);
+    return getParticipantList(event, { resolveName: resolveContactName });
+  }, [event, resolveContactName]);
 
   const organizerInfo = useMemo(() => {
     if (!event?.participants) return null;
@@ -281,7 +240,7 @@ export function EventModal({
     return addHours(getInitialStart(), 1);
   };
 
-  const [title, setTitle] = useState(event?.title || "");
+  const [title, setTitle] = useState(event?.title || defaultTitle || "");
   const [description, setDescription] = useState(event?.description || "");
   const [location, setLocation] = useState(
     event?.locations ? Object.values(event.locations)[0]?.name || "" : ""
@@ -356,38 +315,47 @@ export function EventModal({
     () => (customRule ? buildRecurrenceSummary(customRule, t, locale) : null),
     [customRule, t, locale]
   );
-  const preservedAlertsRef = useRef<Record<string, CalendarEventAlert>>({});
-  const [alertRows, setAlertRows] = useState<AlertRow[]>(() => {
-    if (!event?.alerts) return [];
-    const rows: AlertRow[] = [];
-    for (const [id, alert] of Object.entries(event.alerts)) {
-      // Preserve alerts we can't represent in this UI (absolute triggers,
-      // email actions, offsets with non-canonical shapes) so they survive a save.
-      if (alert.trigger["@type"] !== "OffsetTrigger" || alert.action !== "display") {
-        preservedAlertsRef.current[id] = alert;
-        continue;
-      }
-      const row = offsetToAlertRow(alert.trigger.offset);
-      if (!row) {
-        preservedAlertsRef.current[id] = alert;
-        continue;
-      }
-      rows.push(row);
-    }
-    return rows;
-  });
+  // A new event starts on the calendar's default alerts.
+  const [useDefaultAlerts, setUseDefaultAlerts] = useState(() => (event ? event.useDefaultAlerts === true : true));
+  // Alerts the rows can't represent (absolute triggers, offsets after the
+  // start or relative to the end) are kept here so they survive a save.
+  const [initialAlerts] = useState(() =>
+    event && !event.useDefaultAlerts ? alertsToRows(event.alerts) : { rows: [], preserved: {} }
+  );
+  const [preservedAlerts, setPreservedAlerts] = useState<Record<string, CalendarEventAlert>>(initialAlerts.preserved);
+  const [alertRows, setAlertRows] = useState<AlertRow[]>(initialAlerts.rows);
 
-  const addAlertRow = useCallback(() => {
-    setAlertRows((prev) => [...prev, newAlertRow(10, "minutes")]);
-  }, []);
-  const updateAlertRow = useCallback((id: string, patch: Partial<Omit<AlertRow, "id">>) => {
-    setAlertRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
-  }, []);
-  const removeAlertRow = useCallback((id: string) => {
-    setAlertRows((prev) => prev.filter((r) => r.id !== id));
-  }, []);
+  // Set once "Use calendar defaults" is clicked: from then on the event takes
+  // the calendar's current defaults, not the copy it stored.
+  const [refreshDefaults, setRefreshDefaults] = useState(false);
+
+  // What defaults mode stands for. Stalwart copies the calendar's defaults
+  // into an event only when it is created, so an existing event that stays
+  // in its calendar and keeps its all-day state shows the copy it stored;
+  // otherwise the selected calendar's current defaults apply.
+  const defaultAlerts = useMemo(() => {
+    if (
+      !refreshDefaults &&
+      event?.useDefaultAlerts &&
+      event.alerts && Object.keys(event.alerts).length > 0 &&
+      getPrimaryCalendarId(event) === calendarId &&
+      !!event.showWithoutTime === allDay
+    ) {
+      return event.alerts;
+    }
+    return getCalendarDefaultAlerts(calendars.find((c) => c.id === calendarId), allDay);
+  }, [refreshDefaults, event, calendars, calendarId, allDay]);
+
+  const customizeAlerts = useCallback(() => {
+    const { rows, preserved } = alertsToRows(defaultAlerts);
+    setAlertRows(rows);
+    setPreservedAlerts(preserved);
+    setUseDefaultAlerts(false);
+  }, [defaultAlerts]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  // Set synchronously, so a second save in the same tick is refused too.
+  const savingRef = useRef(false);
 
   const [attendees, setAttendees] = useState<{ name: string; email: string }[]>(() => {
     if (!event?.participants) return [];
@@ -442,12 +410,90 @@ export function EventModal({
           location,
           virtualLocation,
           calendarId,
+          uid: event?.uid,
+          attendees: attendees.map((a) => a.email),
         },
       });
       if (!cancelled) setPluginConflictWarnings(warnings);
     }, 250);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [title, description, startDate, startTime, endDate, endTime, allDay, location, virtualLocation, calendarId]);
+  }, [title, description, startDate, startTime, endDate, endTime, allDay, location, virtualLocation, calendarId, event?.uid, attendees]);
+
+  // Plugins hear about an existing event opened for reading once per event,
+  // and about the form each time it opens (new event, or view -> edit).
+  const reportedOpenRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!event || mode !== "view" || reportedOpenRef.current === event.id) return;
+    reportedOpenRef.current = event.id;
+    void calendarHooks.onCalendarEventOpen.emit(eventToView(event));
+  }, [event, mode]);
+
+  useEffect(() => {
+    if (mode !== "edit" || calendarFormHooks.onCalendarEventFormOpen.size === 0) return;
+    void calendarFormHooks.onCalendarEventFormOpen.emit({
+      title,
+      description,
+      start: allDay ? `${startDate}T00:00:00` : `${startDate}T${startTime}:00`,
+      end: allDay ? `${endDate}T23:59:59` : `${endDate}T${endTime}:00`,
+      isAllDay: allDay,
+      location,
+      virtualLocation,
+      calendarId,
+      uid: event?.uid,
+      attendees: attendees.map((a) => a.email),
+    });
+    // Only the opening counts; the fields are read as they are at that moment.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  // calendar-event-detail: the event as plugins see it, in the read views.
+  const eventDetailProps = useMemo(() => (event ? { event: eventToView(event) } : null), [event]);
+
+  // calendar-event-form: the form's current state in the same shape. Typing
+  // would hand the plugin iframe new props on every key, so the view settles
+  // for half a second first.
+  const formEventView = useMemo<CalendarEventView>(() => {
+    const startStr = allDay ? `${startDate}T00:00:00` : `${startDate}T${startTime || "00:00"}:00`;
+    const start = new Date(startStr);
+    let duration = event?.duration ?? "PT1H";
+    if (!isNaN(start.getTime())) {
+      if (allDay) {
+        const inclusiveEnd = new Date(`${endDate}T00:00:00`);
+        if (!isNaN(inclusiveEnd.getTime())) duration = buildAllDayDuration(start, inclusiveEnd < start ? start : inclusiveEnd);
+      } else {
+        const end = new Date(`${endDate}T${endTime || "00:00"}:00`);
+        if (!isNaN(end.getTime())) duration = buildDuration(start, end);
+      }
+    }
+    const base = event ? eventToView(event) : null;
+    return {
+      id: event?.id ?? "",
+      uid: event?.uid ?? "",
+      calendarId,
+      title,
+      description,
+      start: startStr,
+      duration,
+      timeZone: getEffectiveTimeZone(),
+      utcStart: null,
+      utcEnd: null,
+      isAllDay: allDay,
+      location,
+      status: base?.status ?? "confirmed",
+      participants: attendees.map((a) => {
+        const known = base?.participants.find((p) => p.email.toLowerCase() === a.email.toLowerCase());
+        return known ?? { name: a.name, email: a.email, role: "attendee", status: "needs-action" };
+      }),
+      isRecurring: recurrence !== "none",
+      keywords: base?.keywords ?? [],
+    };
+  }, [event, calendarId, title, description, startDate, startTime, endDate, endTime, allDay, location, attendees, recurrence]);
+  const [settledFormEvent, setSettledFormEvent] = useState(formEventView);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledFormEvent(formEventView), 500);
+    return () => clearTimeout(timer);
+  }, [formEventView]);
+  const eventFormProps = useMemo(() => ({ event: settledFormEvent }), [settledFormEvent]);
 
   // Report live preview to parent for grid outline
   useEffect(() => {
@@ -476,8 +522,14 @@ export function EventModal({
 
   const handleSave = useCallback(async () => {
     const trimmedTitle = title.trim();
-    if (!trimmedTitle || isSaving) return;
-    if (trimmedTitle.length > 500 || description.trim().length > 10000 || location.trim().length > 500) return;
+    if (!trimmedTitle || isSaving || savingRef.current) return;
+    if (trimmedTitle.length > 500 || description.trim().length > 10000 || location.trim().length > 500) {
+      // This guard returned silently, so a rejected save was indistinguishable from a dead
+      // button. The fields also enforce their limits via maxLength, so this is a backstop —
+      // but if it ever fires, say so.
+      toast.error(t("notifications.event_error"));
+      return;
+    }
 
     const pendingAttendee = participantInputRef.current?.flush() ?? null;
     const effectiveAttendees = pendingAttendee ? [...attendees, pendingAttendee] : attendees;
@@ -508,9 +560,10 @@ export function EventModal({
     // grid and prefill are display dates), so label them with that zone.
     const timeZone = getEffectiveTimeZone();
 
+    const trimmedDescription = description.trim();
+
     const data: Partial<CalendarEvent> = {
       title: trimmedTitle,
-      description: description.trim(),
       start: startStr,
       duration,
       timeZone: allDay ? null : timeZone,
@@ -520,6 +573,13 @@ export function EventModal({
       freeBusyStatus: "busy",
       privacy: "public",
     };
+
+    // On an existing event the empty string is how a description gets cleared, but
+    // sending it on creation writes a `DESCRIPTION:` with nothing after it — which
+    // invitation e-mails then render as a "Description" heading over blank space.
+    if (trimmedDescription || event) {
+      data.description = trimmedDescription;
+    }
 
     if (!event) {
       data.uid = generateUUID();
@@ -566,30 +626,28 @@ export function EventModal({
       if (event.excludedRecurrenceRules) data.excludedRecurrenceRules = null;
     }
 
-    const builtAlerts: Record<string, CalendarEventAlert> = { ...preservedAlertsRef.current };
-    let alertIdx = 0;
-    for (const row of alertRows) {
-      const offset = alertRowToOffset(row);
-      if (offset === null) continue;
-      let key = `alert${++alertIdx}`;
-      while (key in builtAlerts) key = `alert${++alertIdx}`;
-      builtAlerts[key] = {
-        "@type": "Alert",
-        trigger: { "@type": "OffsetTrigger", offset, relativeTo: "start" },
-        action: "display",
-        acknowledged: null,
-        relatedTo: null,
-      };
-    }
-    if (Object.keys(builtAlerts).length > 0) {
-      data.alerts = builtAlerts;
-    } else if (event && event.alerts && Object.keys(event.alerts).length > 0) {
-      data.alerts = null;
+    if (useDefaultAlerts) {
+      data.useDefaultAlerts = true;
+      // Stalwart copies the calendar's defaults into a new event itself
+      // (sending alerts too would double them), but setting the flag on an
+      // update keeps whatever alerts the event had, so updates carry them.
+      if (event) data.alerts = defaultAlerts ? structuredClone(defaultAlerts) : null;
+    } else {
+      data.useDefaultAlerts = false;
+      const builtAlerts = rowsToAlerts(alertRows, preservedAlerts);
+      if (Object.keys(builtAlerts).length > 0) {
+        data.alerts = builtAlerts;
+      } else if (event && event.alerts && Object.keys(event.alerts).length > 0) {
+        data.alerts = null;
+      }
     }
 
     if (effectiveAttendees.length > 0 && currentUserEmails.length > 0) {
       const organizerEmail = currentUserEmails[0];
-      const organizerName = existingParticipants.find(p => p.isOrganizer)?.name || "";
+      // On create there are no existing participants, so a fresh event would
+      // store an empty organizer name — fall back to the contact card.
+      const organizerName =
+        existingParticipants.find(p => p.isOrganizer)?.name || resolveContactName(organizerEmail) || "";
       data.participants = buildParticipantMap(
         { name: organizerName, email: organizerEmail },
         effectiveAttendees
@@ -606,14 +664,59 @@ export function EventModal({
       data.organizerCalendarAddress = null;
     }
 
-    const shouldSendScheduling = effectiveAttendees.length > 0 && sendInvitations;
+    // Plugin form-save hook: a handler may refresh form-derived values
+    // (currently the virtual-location link) in the same save that sends
+    // scheduling messages, so invites carry what plugins set here rather
+    // than a stale value from before the save.
+    // The handlers can take seconds (a plugin minting a meeting room), so the
+    // save counts as in flight from here: a second click or Ctrl+Enter must
+    // not start another save, which for a new event would create a second
+    // copy (fresh uid) and send its invitations twice.
+    savingRef.current = true;
     setIsSaving(true);
     try {
+      const pluginPatch = await calendarFormHooks.onCalendarEventFormSave.transform<
+        CalendarEventFormSavePatch
+      >(
+        {},
+        {
+          title: trimmedTitle,
+          description: trimmedDescription,
+          start: startStr,
+          end: allDay ? `${endDate}T23:59:59` : `${endDate}T${endTime}:00`,
+          isAllDay: allDay,
+          location,
+          virtualLocation,
+          calendarId,
+          uid: data.uid ?? event?.uid,
+          attendees: effectiveAttendees.map((a) => a.email),
+        },
+      );
+      if (pluginPatch && typeof pluginPatch.virtualLocation === "string") {
+        if (pluginPatch.virtualLocation.trim()) {
+          data.virtualLocations = {
+            vl1: {
+              "@type": "VirtualLocation",
+              name: null,
+              description: null,
+              uri: pluginPatch.virtualLocation.trim(),
+              features: null,
+            },
+          };
+        } else if (event) {
+          data.virtualLocations = null;
+        } else {
+          delete data.virtualLocations;
+        }
+      }
+
+      const shouldSendScheduling = effectiveAttendees.length > 0 && sendInvitations;
       await onSave(data, shouldSendScheduling);
     } finally {
+      savingRef.current = false;
       setIsSaving(false);
     }
-  }, [title, description, location, virtualLocation, startDate, startTime, endDate, endTime, allDay, calendarId, recurrence, customRule, alertRows, attendees, sendInvitations, currentUserEmails, existingParticipants, event, onSave, isSaving]);
+  }, [title, description, location, virtualLocation, startDate, startTime, endDate, endTime, allDay, calendarId, recurrence, customRule, useDefaultAlerts, defaultAlerts, alertRows, preservedAlerts, attendees, sendInvitations, currentUserEmails, existingParticipants, resolveContactName, event, onSave, isSaving, t]);
 
   const handleRsvp = useCallback((status: CalendarParticipant['participationStatus']) => {
     if (!event || !userParticipantId || !onRsvp) return;
@@ -623,28 +726,7 @@ export function EventModal({
 
   const handleDuplicate = useCallback(() => {
     if (!event || !onDuplicate) return;
-    const start = getEventStartDate(event);
-    const newStart = addDays(start, 1);
-    const newUid = generateUUID();
-    const data: Partial<CalendarEvent> = {
-      uid: newUid,
-      title: event.title,
-      description: event.description,
-      start: event.showWithoutTime ? format(newStart, "yyyy-MM-dd") : format(newStart, "yyyy-MM-dd'T'HH:mm:ss"),
-      duration: event.duration,
-      timeZone: event.timeZone,
-      showWithoutTime: event.showWithoutTime,
-      calendarIds: { ...event.calendarIds },
-      status: "confirmed",
-      freeBusyStatus: event.freeBusyStatus,
-      privacy: event.privacy,
-    };
-    if (event.locations) data.locations = structuredClone(event.locations);
-    if (event.virtualLocations) data.virtualLocations = structuredClone(event.virtualLocations);
-    if (event.recurrenceRules) data.recurrenceRules = structuredClone(event.recurrenceRules);
-    if (event.alerts) data.alerts = structuredClone(event.alerts);
-    if (event.participants) data.participants = structuredClone(event.participants);
-    onDuplicate(data);
+    onDuplicate(buildDuplicateEventData(event));
   }, [event, onDuplicate]);
 
   const modalRef = useRef<HTMLDivElement>(null);
@@ -697,7 +779,7 @@ export function EventModal({
     const startD = getEventStartDate(event);
     const endD = getEventEndDate(event);
     const locationName = event.locations ? Object.values(event.locations)[0]?.name : null;
-    const participants = getParticipantList(event);
+    const participants = getParticipantList(event, { resolveName: resolveContactName });
 
     return (
       <div ref={modalRef} role="dialog" aria-modal={isMobile || undefined} aria-label={event.title || t("events.no_title")} className={isMobile ? mobileRootClass : "flex flex-col h-full bg-background"}>
@@ -778,55 +860,25 @@ export function EventModal({
                 <div className="space-y-1 ps-5">
                   {participants.map(p => (
                     <div key={p.id} className="flex items-center justify-between text-sm">
-                      <span className="truncate">{p.name || p.email}</span>
-                      <StatusBadge status={p.status} isOrganizer={p.isOrganizer} t={t} />
+                      <span className="truncate">
+                        {p.name || p.email}
+                        {p.isOrganizer && (
+                          <span className="text-muted-foreground ms-1">({t("participants.organizer").toLowerCase()})</span>
+                        )}
+                      </span>
+                      <StatusBadge status={p.status} t={t} />
                     </div>
                   ))}
                 </div>
               </div>
             )}
+
+            {eventDetailProps && <PluginSlot name="calendar-event-detail" className="w-full" extraProps={eventDetailProps} />}
           </div>
         </div>
 
         <div className="px-6 py-4 border-t border-border flex-shrink-0">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium">{t("participants.rsvp_label")}</span>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant={userCurrentStatus === "accepted" ? "default" : "outline"}
-                onClick={() => handleRsvp("accepted")}
-                className={userCurrentStatus === "accepted"
-                  ? "bg-success hover:bg-success/80 text-success-foreground"
-                  : "text-success border-success/30 hover:bg-success/10"}
-              >
-                {userCurrentStatus === "accepted" && <Check className="w-4 h-4 me-1" />}
-                {t("participants.accepted")}
-              </Button>
-              <Button
-                size="sm"
-                variant={userCurrentStatus === "tentative" ? "default" : "outline"}
-                onClick={() => handleRsvp("tentative")}
-                className={userCurrentStatus === "tentative"
-                  ? "bg-warning hover:bg-warning/80 text-warning-foreground"
-                  : "border border-warning/30 text-warning hover:bg-warning/10"}
-              >
-                {userCurrentStatus === "tentative" && <Check className="w-4 h-4 me-1" />}
-                {t("participants.tentative")}
-              </Button>
-              <Button
-                size="sm"
-                variant={userCurrentStatus === "declined" ? "default" : "ghost"}
-                onClick={() => handleRsvp("declined")}
-                className={userCurrentStatus === "declined"
-                  ? "bg-destructive hover:bg-destructive/80 text-destructive-foreground"
-                  : "text-destructive hover:bg-destructive/10"}
-              >
-                {userCurrentStatus === "declined" && <Check className="w-4 h-4 me-1" />}
-                {t("participants.declined")}
-              </Button>
-            </div>
-          </div>
+          <RsvpBar status={userCurrentStatus} onRespond={handleRsvp} t={t} />
         </div>
       </div>
     );
@@ -839,9 +891,9 @@ export function EventModal({
     const endD = getEventEndDate(event);
     const locationName = event.locations ? Object.values(event.locations)[0]?.name || null : null;
     const virtualLoc = event.virtualLocations ? Object.values(event.virtualLocations)[0]?.uri || null : null;
-    const viewParticipants = getParticipantList(event);
+    const viewParticipants = getParticipantList(event, { resolveName: resolveContactName });
     const recurrenceLabel = getRecurrenceLabel(event, t, locale);
-    const alertLabel = getAlertLabel(event, t);
+    const alertLabel = formatEventAlertsLabel(event, calendars, t);
     const eventCalendar = calendars.find(c => event.calendarIds[c.id]);
     const color = getEventColor(event, eventCalendar);
 
@@ -966,7 +1018,7 @@ export function EventModal({
                             <span className="text-muted-foreground ms-1">({t("participants.organizer").toLowerCase()})</span>
                           )}
                         </span>
-                        <StatusBadge status={p.status} isOrganizer={p.isOrganizer} t={t} />
+                        <StatusBadge status={p.status} t={t} />
                       </div>
                     ))}
                   </div>
@@ -999,8 +1051,20 @@ export function EventModal({
                 </p>
               </div>
             )}
+
+            {eventDetailProps && <PluginSlot name="calendar-event-detail" className="w-full" extraProps={eventDetailProps} />}
           </div>
         </div>
+
+        {/* RSVP:
+          The viewer owes a reply but may also edit their own copy,
+          so the rsvp-only branch above does not apply to this event.
+        */}
+        {canRsvp && onRsvp && userParticipantId && (
+          <div className="px-6 py-3 border-t border-border flex-shrink-0">
+          <RsvpBar status={userCurrentStatus} onRespond={handleRsvp} t={t} />
+          </div>
+        )}
 
         {/* Action Bar */}
         <div className="px-6 py-3 border-t border-border flex-shrink-0 flex items-center justify-between">
@@ -1114,6 +1178,8 @@ export function EventModal({
                   location,
                   virtualLocation,
                   calendarId,
+                  uid: event?.uid,
+                  attendees: attendees.map((a) => a.email),
                 },
                 setVirtualLocation,
               }}
@@ -1290,64 +1356,34 @@ export function EventModal({
 
           <div>
             <label className="text-sm font-medium mb-1 block">{t("alerts.title")}</label>
-            {alertRows.length === 0 ? (
-              <p className="text-sm text-muted-foreground">{t("alerts.none")}</p>
-            ) : (
-              <div className="space-y-2">
-                {alertRows.map((row) => (
-                  <div key={row.id} className="flex items-center gap-2">
-                    {row.unit !== "at_time" && (
-                      <Input
-                        type="number"
-                        min={1}
-                        max={999}
-                        value={row.value}
-                        onChange={(e) => {
-                          const n = parseInt(e.target.value, 10);
-                          updateAlertRow(row.id, { value: Number.isFinite(n) ? Math.max(1, n) : 1 });
-                        }}
-                        className="w-20"
-                        aria-label={t("alerts.amount")}
-                      />
-                    )}
-                    <select
-                      value={row.unit}
-                      onChange={(e) => {
-                        const unit = e.target.value as AlertUnit;
-                        updateAlertRow(row.id, {
-                          unit,
-                          value: unit === "at_time" ? 0 : (row.value || 1),
-                        });
-                      }}
-                      className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                      aria-label={t("alerts.unit")}
-                    >
-                      <option value="at_time">{t("alerts.at_time")}</option>
-                      <option value="minutes">{t("alerts.unit_minutes_before")}</option>
-                      <option value="hours">{t("alerts.unit_hours_before")}</option>
-                      <option value="days">{t("alerts.unit_days_before")}</option>
-                      <option value="weeks">{t("alerts.unit_weeks_before")}</option>
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => removeAlertRow(row.id)}
-                      className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                      aria-label={t("alerts.remove")}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
+            {useDefaultAlerts ? (
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">{t("alerts.calendar_defaults")}</p>
+                <AlertSummary alerts={defaultAlerts} />
+                <button
+                  type="button"
+                  onClick={customizeAlerts}
+                  className="mt-2 inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                >
+                  {t("alerts.customize")}
+                </button>
               </div>
+            ) : (
+              <AlertListEditor
+                rows={alertRows}
+                onChange={setAlertRows}
+                keptCount={Object.keys(preservedAlerts).length}
+                extraAction={
+                  <button
+                    type="button"
+                    onClick={() => { setUseDefaultAlerts(true); setRefreshDefaults(true); }}
+                    className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                  >
+                    {t("alerts.use_defaults")}
+                  </button>
+                }
+              />
             )}
-            <button
-              type="button"
-              onClick={addAlertRow}
-              className="mt-2 inline-flex items-center gap-1 text-sm text-primary hover:underline"
-            >
-              <Plus className="w-4 h-4" />
-              {t("alerts.add")}
-            </button>
           </div>
 
           {attendees.length > 0 && (
@@ -1364,6 +1400,8 @@ export function EventModal({
               </label>
             </div>
           )}
+
+          <PluginSlot name="calendar-event-form" className="w-full" extraProps={eventFormProps} />
         </div>
       </div>
 
@@ -1439,7 +1477,9 @@ export function EventModal({
             disabled={!title.trim() || isSaving}
             className="w-full"
           >
-            {t("form.save")}
+            {/* While a save is in flight the button was disabled with no visible change, so a
+                slow request (mobile, VPN) looked like a dead button for the whole timeout. */}
+            {isSaving ? t("subscription.saving") : t("form.save")}
           </Button>
         </div>
         )}
@@ -1448,14 +1488,65 @@ export function EventModal({
   );
 }
 
-function StatusBadge({ status, isOrganizer, t }: {
-  status: CalendarParticipant['participationStatus'];
-  isOrganizer: boolean;
+/**
+ * The accept / tentative / decline row. Shared by the rsvp-only view and by the
+ * read-only view that an *editable* received invite lands in - the latter is the
+ * case that had no way to answer an invite at all (#937).
+ */
+function RsvpBar({ status, onRespond, t }: {
+  status: CalendarParticipant['participationStatus'] | null;
+  onRespond: (status: CalendarParticipant['participationStatus']) => void;
   t: ReturnType<typeof useTranslations>;
 }) {
-  if (isOrganizer) {
-    return <span className="text-xs text-primary">{t("participants.organizer")}</span>;
-  }
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-sm font-medium">{t("participants.rsvp_label")}</span>
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          variant={status === "accepted" ? "default" : "outline"}
+          onClick={() => onRespond("accepted")}
+          className={status === "accepted"
+            ? "bg-success hover:bg-success/80 text-success-foreground"
+            : "text-success border-success/30 hover:bg-success/10"}
+        >
+          {status === "accepted" && <Check className="w-4 h-4 me-1" />}
+          {t("participants.accepted")}
+        </Button>
+        <Button
+          size="sm"
+          variant={status === "tentative" ? "default" : "outline"}
+          onClick={() => onRespond("tentative")}
+          className={status === "tentative"
+            ? "bg-warning hover:bg-warning/80 text-warning-foreground"
+            : "border border-warning/30 text-warning hover:bg-warning/10"}
+        >
+          {status === "tentative" && <Check className="w-4 h-4 me-1" />}
+          {t("participants.tentative")}
+        </Button>
+        <Button
+          size="sm"
+          variant={status === "declined" ? "default" : "ghost"}
+          onClick={() => onRespond("declined")}
+          className={status === "declined"
+            ? "bg-destructive hover:bg-destructive/80 text-destructive-foreground"
+            : "text-destructive hover:bg-destructive/10"}
+        >
+          {status === "declined" && <Check className="w-4 h-4 me-1" />}
+          {t("participants.declined")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge({ status, t }: {
+  status: CalendarParticipant['participationStatus'];
+  t: ReturnType<typeof useTranslations>;
+}) {
+  // The organizer is marked by the "(组织者)" suffix on the name; the badge
+  // shows their participation status (organizers default to accepted) rather
+  // than repeating the organizer label.
   const colors: Record<string, string> = {
     accepted: "text-success",
     declined: "text-destructive",

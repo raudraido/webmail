@@ -1,7 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { X } from "lucide-react";
+import { X } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { SearchFilters, sizeFilterBytes } from "@/lib/jmap/search-utils";
 
@@ -66,6 +66,9 @@ export function SearchChips({
   }
   if (sizeFilterBytes(filters.maxSizeKb) !== null) {
     chips.push({ key: "maxSizeKb", label: t("size_max"), value: `${filters.maxSizeKb} KB` });
+  }
+  if (filters.pluginFilter) {
+    chips.push({ key: "pluginFilter", label: filters.pluginFilter.label, value: "" });
   }
 
   if (chips.length === 0) return null;

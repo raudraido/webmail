@@ -12,6 +12,7 @@ import {
   EMAIL_IFRAME_SANITIZE_CONFIG,
   isExternalResourceUrl,
   isHttpLinkHref,
+  isOpenableLinkHref,
   applyNewTabToAnchor,
   sanitizeI18nHtml,
   sanitizePluginBodyHtml,
@@ -481,6 +482,49 @@ describe('email-sanitization', () => {
       expect(styleHasExternalUrl(style)).toBe(false);
       expect(stripExternalCssUrls(style)).toBe(style);
     });
+
+    const BS = String.fromCharCode(92);
+
+    it('detects an escaped url keyword', () => {
+      const style = `background:${BS}75 rl(https://tracker.example/p.png)`;
+      expect(styleHasExternalUrl(style)).toBe(true);
+      expect(stripExternalCssUrls(style)).not.toContain('tracker.example');
+    });
+
+    it('detects image-set() with plain strings', () => {
+      const style = "background-image:image-set('https://tracker.example/p.png' 1x)";
+      expect(styleHasExternalUrl(style)).toBe(true);
+      expect(stripExternalCssUrls(style)).toBe('background-image:none');
+    });
+
+    it('detects an unclosed url() at the end of the declarations', () => {
+      const style = 'width:9px;background:url(https://tracker.example/p.png';
+      expect(styleHasExternalUrl(style)).toBe(true);
+      expect(stripExternalCssUrls(style)).not.toContain('tracker.example');
+    });
+
+    it('detects backslash-spelled hosts inside url()', () => {
+      // CSS reads an escaped backslash as one "\", which the URL parser
+      // then treats as "/": "/\host" is "//host".
+      expect(styleHasExternalUrl(`background:url(/${BS}${BS}tracker.example/p.png)`)).toBe(true);
+    });
+  });
+
+  describe('isExternalResourceUrl: backslashes and slashless schemes', () => {
+    const BS = String.fromCharCode(92);
+    it.each([
+      `https:/${BS}tracker.example/p.gif`,
+      `https:${BS}${BS}tracker.example/p.gif`,
+      `/${BS}tracker.example/p.gif`,
+      `${BS}${BS}tracker.example/p.gif`,
+      'https:tracker.example/p.gif',
+    ])('treats %s as external', (url) => {
+      expect(isExternalResourceUrl(url)).toBe(true);
+    });
+
+    it('still leaves a plain relative path alone', () => {
+      expect(isExternalResourceUrl('/relative/path.png')).toBe(false);
+    });
   });
 
   describe('stripExternalStyleSheetCss (<style> block defence-in-depth, #457)', () => {
@@ -903,6 +947,18 @@ describe('email-sanitization', () => {
       expect(img.getAttribute('data-blocked-src')).toBe('https://tracker.example/pixel.gif');
     });
 
+    it('keeps a leading <style> block when it blocks an image', () => {
+      // Collapsing the emptied image cell re-parses the HTML; a <style> at the
+      // very start used to land in <head> there and get dropped, so the mail
+      // lost all its CSS until remote content was allowed.
+      const result = sanitizeEmailBodyForIframe(
+        '<style>.card { background: #fff; }</style><table><tr><td><img src="https://cdn.example/a.png"></td></tr></table>',
+        true,
+      );
+      expect(result.blockedExternalContent).toBe(true);
+      expect(result.html).toContain('<style>.card { background: #fff; }</style>');
+    });
+
     it('leaves external images alone when blocking is off', () => {
       const result = sanitizeEmailBodyForIframe('<img src="https://cdn.example/a.png">', false);
       expect(result.blockedExternalContent).toBe(false);
@@ -965,5 +1021,34 @@ describe('email-sanitization', () => {
       expect(sanitizeEmailHtml('<img src="https://cdn.example/a.png">'))
         .toContain('https://cdn.example/a.png');
     });
+  });
+});
+
+describe('isOpenableLinkHref (message-body click -> window.open gate, GHSA-xvjh-v9c6-qcvc)', () => {
+  it('lets web links and external protocol handlers through', () => {
+    expect(isOpenableLinkHref('https://example.com/x')).toBe(true);
+    expect(isOpenableLinkHref('HTTP://example.com')).toBe(true);
+    expect(isOpenableLinkHref('//example.com/x')).toBe(true);
+    expect(isOpenableLinkHref('tel:+4912345')).toBe(true);
+    expect(isOpenableLinkHref('sms:+4912345')).toBe(true);
+    expect(isOpenableLinkHref('ftp://example.com/f')).toBe(true);
+  });
+
+  it('refuses anything that would open inside the webmail origin', () => {
+    expect(isOpenableLinkHref('blob:https://mail.example/0f3d-ab12')).toBe(false);
+    expect(isOpenableLinkHref('data:text/html,<script>alert(1)</script>')).toBe(false);
+    expect(isOpenableLinkHref('data:image/png;base64,AAAA')).toBe(false);
+    expect(isOpenableLinkHref('statement.pdf')).toBe(false);
+    expect(isOpenableLinkHref('/en/mail/folder/inbox/statement.pdf')).toBe(false);
+    expect(isOpenableLinkHref('./x')).toBe(false);
+    expect(isOpenableLinkHref('cid:unresolved')).toBe(false);
+    expect(isOpenableLinkHref('javascript:alert(1)')).toBe(false);
+    expect(isOpenableLinkHref('')).toBe(false);
+    expect(isOpenableLinkHref(null)).toBe(false);
+  });
+
+  it('ignores leading control characters and whitespace when reading the scheme', () => {
+    expect(isOpenableLinkHref('blob:https://mail.example/x')).toBe(false);
+    expect(isOpenableLinkHref(' 	tel:123')).toBe(true);
   });
 });

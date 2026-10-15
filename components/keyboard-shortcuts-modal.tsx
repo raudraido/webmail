@@ -1,11 +1,14 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { X, Keyboard } from "lucide-react";
-import { KEYBOARD_SHORTCUTS } from "@/hooks/use-keyboard-shortcuts";
+import { X, Keyboard } from "@/components/icons";
+import { KEYBOARD_SHORTCUTS, type ShortcutEntry } from "@/hooks/use-keyboard-shortcuts";
+import { useSettingsStore } from "@/stores/settings-store";
 import { cn } from "@/lib/utils";
 import { useFocusTrap } from "@/hooks/use-focus-trap";
 import { useTour } from "@/components/tour/tour-provider";
+import { useProInterfaceActive } from "@/components/pro/pro-interface-redirect";
+import { usePluginActions } from "@/components/plugins/plugin-actions";
 
 interface KeyboardShortcutsModalProps {
   isOpen: boolean;
@@ -15,6 +18,13 @@ interface KeyboardShortcutsModalProps {
 export function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShortcutsModalProps) {
   const t = useTranslations();
   const { startTour } = useTour();
+  const interfaceLayout = useSettingsStore((state) => state.interfaceLayout);
+  const shell = useProInterfaceActive() ? "pro" : "standard";
+  // Plugin buttons in the composer that have a shortcut (composer-toolbar-actions).
+  const pluginComposerShortcuts = usePluginActions("composer-toolbar-actions").filter((a) => a.shortcut);
+  // Rows that belong to one interface layout (or one shell) are listed only under it.
+  const shown = (entries: readonly ShortcutEntry[]) =>
+    entries.filter((entry) => (!entry.layout || entry.layout === interfaceLayout) && (!entry.shell || entry.shell === shell));
 
   const modalRef = useFocusTrap({
     isActive: isOpen,
@@ -66,7 +76,7 @@ export function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShortcutsMod
                 {t("shortcuts.sections.navigation")}
               </h3>
               <div className="space-y-2">
-                {KEYBOARD_SHORTCUTS.navigation.map((shortcut) => (
+                {shown(KEYBOARD_SHORTCUTS.navigation).map((shortcut) => (
                   <ShortcutRow
                     key={shortcut.key}
                     shortcutKey={shortcut.key}
@@ -82,7 +92,7 @@ export function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShortcutsMod
                 {t("shortcuts.sections.actions")}
               </h3>
               <div className="space-y-2">
-                {KEYBOARD_SHORTCUTS.actions.map((shortcut) => (
+                {shown(KEYBOARD_SHORTCUTS.actions).map((shortcut) => (
                   <ShortcutRow
                     key={shortcut.key}
                     shortcutKey={shortcut.key}
@@ -98,7 +108,7 @@ export function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShortcutsMod
                 {t("shortcuts.sections.global")}
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {KEYBOARD_SHORTCUTS.global.map((shortcut) => (
+                {shown(KEYBOARD_SHORTCUTS.global).map((shortcut) => (
                   <ShortcutRow
                     key={shortcut.key}
                     shortcutKey={shortcut.key}
@@ -114,7 +124,7 @@ export function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShortcutsMod
                 {t("shortcuts.sections.threads")}
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {KEYBOARD_SHORTCUTS.threads.map((shortcut) => (
+                {shown(KEYBOARD_SHORTCUTS.threads).map((shortcut) => (
                   <ShortcutRow
                     key={shortcut.key}
                     shortcutKey={shortcut.key}
@@ -130,11 +140,18 @@ export function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShortcutsMod
                 {t("shortcuts.sections.composer")}
               </h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {KEYBOARD_SHORTCUTS.composer.map((shortcut) => (
+                {shown(KEYBOARD_SHORTCUTS.composer).map((shortcut) => (
                   <ShortcutRow
                     key={shortcut.key}
                     shortcutKey={shortcut.key}
                     description={t(shortcut.description)}
+                  />
+                ))}
+                {pluginComposerShortcuts.map((action) => (
+                  <ShortcutRow
+                    key={`${action.pluginId}:${action.id}`}
+                    shortcutKey={action.shortcut!}
+                    description={`${action.label} (${action.pluginName})`}
                   />
                 ))}
               </div>

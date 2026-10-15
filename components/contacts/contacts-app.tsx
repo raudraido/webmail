@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { Suspense, useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useTranslations } from "next-intl";
 import { useSearchParams } from "next/navigation";
 import { useRouter } from "@/i18n/navigation";
-import { ArrowLeft, Users, AlertTriangle } from "lucide-react";
+import { ArrowLeft, Users, AlertTriangle } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useConfirmDialog } from "@/hooks/use-confirm-dialog";
@@ -42,6 +42,10 @@ import { appPath, buildContactsPath, parseContactsPath, type ContactDeepLink } f
 import { consumePendingDeepLinkEntry, subscribePendingDeepLink } from "@/lib/deep-link-handoff";
 import { useDeepLinkUrl } from "@/hooks/use-deep-link-url";
 import { useProInterfaceActive } from "@/components/pro/pro-interface-redirect";
+import { useLiteLinkSegments } from "@/hooks/use-lite-link-segments";
+import { useDocumentTitle } from "@/hooks/use-document-title";
+import { MvTopBar } from "@/components/layout/mv-top-bar";
+import { useMountainViewShell } from "@/hooks/use-mountain-view-shell";
 
 type View =
   | "list"
@@ -58,8 +62,12 @@ export interface ContactsAppProps {
   linkSegments?: string[];
 }
 
-export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
+function ContactsAppContent({ linkSegments: routeSegments }: ContactsAppProps = {}) {
+  // Static Lite build: the route params are empty, read the link from the URL.
+  const linkSegments = useLiteLinkSegments('contacts', routeSegments);
   const t = useTranslations("contacts");
+  const tSidebar = useTranslations("sidebar");
+  useDocumentTitle(tSidebar("contacts"));
   const contactsEnabled = usePolicyStore((s) => s.isFeatureEnabled('contactsEnabled'));
   const { client, isAuthenticated, logout, checkAuth, isLoading: authLoading } = useAuthStore();
   const { showAppsModal, inlineApp, loadedApps, handleManageApps, handleInlineApp, closeInlineApp, closeAppsModal } = useSidebarApps();
@@ -71,6 +79,7 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
     selectedContactId,
     searchQuery,
     supportsSync,
+    contactsLoaded,
     selectedContactIds,
     setSelectedContact,
     setSearchQuery,
@@ -119,6 +128,8 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
   const isMobile = useIsMobile();
   const isDesktop = useIsDesktop();
   const isEmbedded = useIsEmbedded();
+  // Mountain View's desktop chrome: its top bar in place of the left rail.
+  const mvShell = useMountainViewShell(isEmbedded);
   const router = useRouter();
   const searchParams = useSearchParams();
   // One-shot intent flag: only consume the URL params on the first render that
@@ -327,21 +338,23 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
   const handleDropContactsToCategory = useCallback(async (contactIds: string[], keyword: string) => {
     if (!client && supportsSync) return;
     try {
+      // Contacts in the category afterwards; a plugin may stop some updates.
+      let added = 0;
       for (const contactId of contactIds) {
         const contact = contacts.find(c => c.id === contactId);
         if (!contact) continue;
         const existingKeywords = contact.keywords || {};
-        if (existingKeywords[keyword]) continue; // already has this keyword
+        if (existingKeywords[keyword]) { added++; continue; } // already has this keyword
         const updatedKeywords = { ...existingKeywords, [keyword]: true };
-        if (supportsSync && client) {
-          await updateContact(client, contactId, { keywords: updatedKeywords });
-        } else {
-          updateLocalContact(contactId, { keywords: updatedKeywords });
-        }
+        const updated = supportsSync && client
+          ? await updateContact(client, contactId, { keywords: updatedKeywords })
+          : await updateLocalContact(contactId, { keywords: updatedKeywords });
+        if (updated !== false) added++;
       }
-      const msg = contactIds.length === 1
+      if (added === 0) return;
+      const msg = added === 1
         ? t("category_added", { name: keyword })
-        : t("category_added_plural", { count: contactIds.length, name: keyword });
+        : t("category_added_plural", { count: added, name: keyword });
       toast.success(msg);
     } catch (error) {
       console.error('Failed to add contacts to category:', error);
@@ -416,11 +429,11 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
     if (!confirmed) return;
 
     try {
-      if (supportsSync && client) {
-        await deleteContact(client, contactId);
-      } else {
-        deleteLocalContact(contactId);
-      }
+      const deleted = supportsSync && client
+        ? await deleteContact(client, contactId)
+        : await deleteLocalContact(contactId);
+      // A plugin stopped it and has told the user why.
+      if (!deleted) return;
       toast.success(t("toast.deleted"));
       if (selectedContactId === contactId) setView("list");
     } catch (error) {
@@ -457,33 +470,27 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
     const { id: _id, uid: _uid, created: _created, updated: _updated, ...rest } = source;
     void _id; void _uid; void _created; void _updated;
     const data: Partial<ContactCard> = JSON.parse(JSON.stringify(rest));
-    if (supportsSync && client) {
-      await createContact(client, data);
-      toast.success(t("toast.created"));
-    } else {
-      const localContact: ContactCard = {
+    const created = supportsSync && client
+      ? await createContact(client, data)
+      : await addLocalContact({
         id: `local-${generateUUID()}`,
         addressBookIds: data.addressBookIds || {},
         ...data,
-      };
-      addLocalContact(localContact);
-      toast.success(t("toast.created"));
-    }
+      });
+    if (created) toast.success(t("toast.created"));
   }, [supportsSync, client, createContact, addLocalContact, t]);
 
   const handleSaveNew = useCallback(async (data: Partial<ContactCard>) => {
-    if (supportsSync && client) {
-      await createContact(client, data);
-      toast.success(t("toast.created"));
-    } else {
-      const localContact: ContactCard = {
+    const created = supportsSync && client
+      ? await createContact(client, data)
+      : await addLocalContact({
         id: `local-${generateUUID()}`,
         addressBookIds: {},
         ...data,
-      };
-      addLocalContact(localContact);
-      toast.success(t("toast.created"));
-    }
+      });
+    // A plugin stopped it: keep the form open with what was typed.
+    if (!created) return;
+    toast.success(t("toast.created"));
     setDefaultBookIdForCreate(undefined);
     setCreatePrefill(undefined);
     if (returnToEmail) {
@@ -497,13 +504,11 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
   const handleSaveEdit = useCallback(async (data: Partial<ContactCard>) => {
     if (!selectedContact) return;
 
-    if (supportsSync && client) {
-      await updateContact(client, selectedContact.id, data);
-      toast.success(t("toast.updated"));
-    } else {
-      updateLocalContact(selectedContact.id, data);
-      toast.success(t("toast.updated"));
-    }
+    const updated = supportsSync && client
+      ? await updateContact(client, selectedContact.id, data)
+      : await updateLocalContact(selectedContact.id, data);
+    if (!updated) return;
+    toast.success(t("toast.updated"));
     setView("detail");
   }, [supportsSync, client, selectedContact, updateContact, updateLocalContact, t]);
 
@@ -691,10 +696,10 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
     if (!confirmed) return;
 
     try {
-      await bulkDeleteContacts(
+      if (!(await bulkDeleteContacts(
         supportsSync && client ? client : null,
         Array.from(selectedContactIds)
-      );
+      ))) return;
       toast.success(t("bulk.deleted", { count: selectedContactIds.size }));
       setView("list");
     } catch (error) {
@@ -890,12 +895,21 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
   };
 
   return (
-    <div className={cn("flex flex-col bg-background overflow-hidden pt-[env(safe-area-inset-top)]", isEmbedded ? "h-full" : "h-dvh")}>
+    <div className={cn("flex flex-col overflow-hidden pt-[env(safe-area-inset-top)]", mvShell ? "bg-[var(--mv-canvas)]" : "bg-background", isEmbedded ? "h-full" : "h-dvh")}>
       <AppTopBannerSlot />
       {refreshIndicator}
-      <div className={cn("flex flex-1 min-h-0 overflow-hidden", isMobile && "flex-col")}>
+      {mvShell && (
+        <MvTopBar
+          showMenuButton={false}
+          onManageApps={handleManageApps}
+          onInlineApp={handleInlineApp}
+          onCloseInlineApp={closeInlineApp}
+          activeAppId={inlineApp?.id ?? null}
+        />
+      )}
+      <div data-mv-card={mvShell ? "" : undefined} className={cn("flex flex-1 min-h-0 overflow-hidden", isMobile && "flex-col", mvShell && "mb-4 mx-4")}>
       {/* Navigation Rail - desktop only (hidden when embedded in Pro shell) */}
-      {!isMobile && !isEmbedded && (
+      {!isMobile && !isEmbedded && !mvShell && (
         <div className="w-14 bg-secondary flex flex-col flex-shrink-0" style={{ borderRight: '1px solid rgba(128, 128, 128, 0.3)' }}>
           <NavigationRail
             collapsed
@@ -1035,6 +1049,7 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
                   onDeleteContact={handleDeleteContact}
                   onAddContactToGroup={handleAddContactToGroup}
                   onMenuClick={isNarrow ? () => setNarrowSidebarOpen(true) : undefined}
+                  isLoading={supportsSync && !contactsLoaded}
                 />
               </div>
 
@@ -1167,5 +1182,15 @@ export function ContactsApp({ linkSegments }: ContactsAppProps = {}) {
       })()}
       </div>
     </div>
+  );
+}
+
+// useSearchParams() above needs a Suspense boundary for the surface to
+// prerender (static Lite build); at runtime it never suspends.
+export function ContactsApp(props: ContactsAppProps = {}) {
+  return (
+    <Suspense fallback={null}>
+      <ContactsAppContent {...props} />
+    </Suspense>
   );
 }

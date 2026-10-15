@@ -1,17 +1,33 @@
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ThreadListItem } from '../thread-list-item';
 import { useSettingsStore, DEFAULT_KEYWORDS } from '@/stores/settings-store';
 import { useEmailStore } from '@/stores/email-store';
-import { groupEmailsByThread } from '@/lib/thread-utils';
+import { useUIStore } from '@/stores/ui-store';
+import { emailKeyFor, groupEmailsByThread } from '@/lib/thread-utils';
 import type { Email } from '@/lib/jmap/types';
 
 vi.mock('@/hooks/use-email-drag', () => ({
   useEmailDrag: () => ({ dragHandlers: {}, isDragging: false }),
 }));
 
-vi.mock('@/stores/auth-store', () => ({
-  useAuthStore: () => ({ identities: [] }),
+vi.mock('@/stores/auth-store', () => {
+  const state = { identities: [], username: null };
+  return {
+    useAuthStore: (selector?: (s: typeof state) => unknown) => (selector ? selector(state) : state),
+  };
+});
+
+const ACCOUNT_TEAL = { id: 'acct-teal', avatarColor: '#0d9488', label: 'Teal account' };
+const accountState = {
+  getAccountById: (id: string) => (id === ACCOUNT_TEAL.id ? ACCOUNT_TEAL : undefined),
+};
+vi.mock('@/stores/account-store', () => ({
+  useAccountStore: Object.assign(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (selector: any) => (selector ? selector(accountState) : accountState),
+    { getState: () => accountState },
+  ),
 }));
 
 const makeEmail = (overrides: Partial<Email> = {}): Email => ({
@@ -45,15 +61,20 @@ function renderRow(email: Email) {
   );
 }
 
+beforeEach(() => {
+  useUIStore.setState({ isMobile: false, isTablet: false, isDesktop: true });
+});
+
 describe('ThreadListItem tag badge', () => {
   beforeEach(() => {
     useSettingsStore.setState({
       emailKeywords: [...DEFAULT_KEYWORDS],
       showPreview: false,
       mailLayout: 'split',
+      interfaceLayout: 'default',
     });
     useEmailStore.setState({
-      selectedEmailIds: new Set<string>(),
+      selectedEmailKeys: new Set<string>(),
       selectedMailbox: 'inbox',
     });
   });
@@ -124,9 +145,10 @@ describe('ThreadListItem multi-message thread', () => {
       emailKeywords: [...DEFAULT_KEYWORDS],
       showPreview: false,
       mailLayout: 'split',
+      interfaceLayout: 'default',
     });
     useEmailStore.setState({
-      selectedEmailIds: new Set<string>(),
+      selectedEmailKeys: new Set<string>(),
       selectedMailbox: 'inbox',
     });
   });
@@ -185,9 +207,10 @@ describe('ThreadListItem row content', () => {
       emailKeywords: [...DEFAULT_KEYWORDS],
       showPreview: false,
       mailLayout: 'split',
+      interfaceLayout: 'default',
     });
     useEmailStore.setState({
-      selectedEmailIds: new Set<string>(),
+      selectedEmailKeys: new Set<string>(),
       selectedMailbox: 'inbox',
     });
   });
@@ -208,6 +231,129 @@ describe('ThreadListItem row content', () => {
     // rather than getting a paragraph of its own.
     expect(container.querySelector('p')).toBeNull();
   });
+
+  it('puts the star at the trailing edge in the Mountain View phone row', () => {
+    useSettingsStore.setState({ interfaceLayout: 'mountain-view', mailLayout: 'split' });
+    useUIStore.setState({ isMobile: true, isTablet: false, isDesktop: false });
+    const onToggleStar = vi.fn();
+    const [thread] = groupEmailsByThread([makeEmail()]);
+    const { container } = render(
+      <ThreadListItem
+        thread={thread}
+        isExpanded={false}
+        onToggleExpand={() => {}}
+        onEmailSelect={() => {}}
+        onToggleStar={onToggleStar}
+      />,
+    );
+
+    const star = container.querySelector<HTMLButtonElement>('[data-mv-mobile-row] button[aria-pressed]');
+    expect(star).not.toBeNull();
+    fireEvent.click(star!);
+
+    expect(onToggleStar).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-mv-mobile-row]')).toBeInTheDocument();
+  });
+});
+
+describe('ThreadListItem opening a thread on the phone', () => {
+  const twoMessageThread = () => groupEmailsByThread([
+    makeEmail({ id: 'older', receivedAt: '2024-01-14T10:00:00Z' }),
+    makeEmail({ id: 'newer', receivedAt: '2024-01-15T10:00:00Z' }),
+  ])[0];
+
+  function tap(interfaceLayout: 'mountain-view' | 'default') {
+    useSettingsStore.setState({ interfaceLayout, mailLayout: 'split' });
+    useUIStore.setState({ isMobile: true, isTablet: false, isDesktop: false });
+    useEmailStore.setState({ selectedEmailKeys: new Set<string>(), selectedMailbox: 'inbox' });
+    const onEmailSelect = vi.fn();
+    const onOpenConversation = vi.fn();
+    render(
+      <ThreadListItem
+        thread={twoMessageThread()}
+        isExpanded={false}
+        onToggleExpand={() => {}}
+        onEmailSelect={onEmailSelect}
+        onOpenConversation={onOpenConversation}
+      />,
+    );
+    fireEvent.click(screen.getByText('Test Subject'));
+    return { onEmailSelect, onOpenConversation };
+  }
+
+  // #1224: the phone thread view lists newest first and has no details, so
+  // Mountain View opens the thread in the viewer, as on the desktop.
+  it('opens the latest message in the viewer in Mountain View', () => {
+    const { onEmailSelect, onOpenConversation } = tap('mountain-view');
+    expect(onOpenConversation).not.toHaveBeenCalled();
+    expect(onEmailSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'newer' }));
+  });
+
+  it('keeps the phone thread view in the default layout', () => {
+    const { onEmailSelect, onOpenConversation } = tap('default');
+    expect(onOpenConversation).toHaveBeenCalledTimes(1);
+    expect(onEmailSelect).not.toHaveBeenCalled();
+  });
+});
+
+// #1231: opening a message threw away the ticked rows. Mountain View on the
+// desktop keeps them, as Gmail does, so selecting can carry on after reading.
+describe('ThreadListItem keeping the selection when a message opens', () => {
+  function open(interfaceLayout: 'mountain-view' | 'default', emails: Email[]) {
+    useSettingsStore.setState({ interfaceLayout, mailLayout: 'split' });
+    useUIStore.setState({ isMobile: false, isTablet: false, isDesktop: true });
+    useEmailStore.setState({ selectedEmailKeys: new Set(['other']), selectedMailbox: 'inbox' });
+    const onEmailSelect = vi.fn();
+    const [thread] = groupEmailsByThread(emails);
+    render(
+      <ThreadListItem thread={thread} isExpanded={false} onToggleExpand={() => {}} onEmailSelect={onEmailSelect} />,
+    );
+    fireEvent.click(screen.getByText('Test Subject'));
+    return onEmailSelect;
+  }
+  const conversation = () => [
+    makeEmail({ id: 'older', receivedAt: '2024-01-14T10:00:00Z' }),
+    makeEmail({ id: 'newer', receivedAt: '2024-01-15T10:00:00Z' }),
+  ];
+
+  it('keeps the ticked rows when a Mountain View message opens', () => {
+    const onEmailSelect = open('mountain-view', [makeEmail()]);
+    expect(onEmailSelect).toHaveBeenCalledTimes(1);
+    expect([...useEmailStore.getState().selectedEmailKeys]).toEqual(['other']);
+  });
+
+  it('keeps them when a Mountain View conversation opens', () => {
+    const onEmailSelect = open('mountain-view', conversation());
+    expect(onEmailSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'newer' }));
+    expect([...useEmailStore.getState().selectedEmailKeys]).toEqual(['other']);
+  });
+
+  it('still clears them in the default layout', () => {
+    open('default', [makeEmail()]);
+    expect(useEmailStore.getState().selectedEmailKeys.size).toBe(0);
+  });
+});
+
+describe('ThreadListItem Mountain View phone row layout', () => {
+  it('sets the star at the end of the preview line, not under the time', () => {
+    useSettingsStore.setState({ interfaceLayout: 'mountain-view', mailLayout: 'split', showPreview: true, density: 'regular' } as never);
+    useUIStore.setState({ isMobile: true, isTablet: false, isDesktop: false });
+    const [thread] = groupEmailsByThread([makeEmail()]);
+    const { container } = render(
+      <ThreadListItem
+        thread={thread}
+        isExpanded={false}
+        onToggleExpand={() => {}}
+        onEmailSelect={() => {}}
+        onToggleStar={() => {}}
+      />,
+    );
+
+    const stars = container.querySelectorAll('[data-mv-mobile-row] button[aria-pressed]');
+    expect(stars).toHaveLength(1);
+    // Same line as the preview text: snippet ... star.
+    expect(stars[0].parentElement?.querySelector('p')).not.toBeNull();
+  });
 });
 
 describe('ThreadListItem shift-range avatar selection', () => {
@@ -216,6 +362,7 @@ describe('ThreadListItem shift-range avatar selection', () => {
       emailKeywords: [...DEFAULT_KEYWORDS],
       showPreview: false,
       mailLayout: 'split',
+      interfaceLayout: 'default',
     });
   });
 
@@ -226,8 +373,8 @@ describe('ThreadListItem shift-range avatar selection', () => {
     // Selection mode active, with the anchor on e1.
     useEmailStore.setState({
       emails: [e1, e2, e3],
-      selectedEmailIds: new Set(['e1']),
-      lastSelectedEmailId: 'e1',
+      selectedEmailKeys: new Set(['e1']),
+      lastSelectedEmailKey: 'e1',
       selectedMailbox: 'inbox',
     });
 
@@ -237,7 +384,7 @@ describe('ThreadListItem shift-range avatar selection', () => {
       avatar.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
     });
 
-    const selected = useEmailStore.getState().selectedEmailIds;
+    const selected = useEmailStore.getState().selectedEmailKeys;
     expect(selected.has('e1')).toBe(true);
     expect(selected.has('e2')).toBe(true); // the row in between got filled in
     expect(selected.has('e3')).toBe(true);
@@ -253,10 +400,11 @@ describe('ThreadListItem row tint', () => {
       emailKeywords: [...DEFAULT_KEYWORDS],
       showPreview: false,
       mailLayout: 'split',
+      interfaceLayout: 'default',
       tintListRowsByTag: true,
     });
     useEmailStore.setState({
-      selectedEmailIds: new Set(['email-1']),
+      selectedEmailKeys: new Set(['email-1']),
       selectedMailbox: 'inbox',
     });
   });
@@ -286,5 +434,215 @@ describe('ThreadListItem row tint', () => {
 
     expect(classes).not.toContain('bg-red-50');
     expect(classes).toContain('bg-accent/40');
+  });
+});
+
+
+describe('ThreadListItem account row tint', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({
+      emailKeywords: [...DEFAULT_KEYWORDS],
+      showPreview: false,
+      mailLayout: 'split',
+      interfaceLayout: 'default',
+      tintListRowsByTag: true,
+      tintListRowsByAccount: false,
+    });
+    useEmailStore.setState({
+      selectedEmailKeys: new Set<string>(),
+      selectedMailbox: 'inbox',
+      isUnifiedView: false,
+    });
+  });
+
+  const row = (c: HTMLElement) => c.querySelector('[data-subject="Test Subject"]');
+  const accountEmail = () => makeEmail({ accountId: ACCOUNT_TEAL.id, accountLabel: ACCOUNT_TEAL.label });
+
+  it('tints the row with the account colour in the unified view', () => {
+    useSettingsStore.setState({ tintListRowsByAccount: true });
+    useEmailStore.setState({ isUnifiedView: true });
+
+    const { container } = renderRow(accountEmail());
+    expect(row(container)!.className).toContain('bg-teal-100');
+  });
+
+  it('leaves rows untinted outside the unified view', () => {
+    useSettingsStore.setState({ tintListRowsByAccount: true });
+    useEmailStore.setState({ isUnifiedView: false });
+
+    const { container } = renderRow(accountEmail());
+    expect(row(container)!.className).not.toContain('bg-teal-100');
+  });
+
+  it('does not tint by account while the setting is off', () => {
+    useEmailStore.setState({ isUnifiedView: true });
+
+    const { container } = renderRow(accountEmail());
+    expect(row(container)!.className).not.toContain('bg-teal-100');
+  });
+
+  it('still tints when accountId matches no local account', () => {
+    // Shared/group entries carry the JMAP owner id, which no AccountEntry
+    // matches - the row must fall back to a colour from the label, not stay blank.
+    useSettingsStore.setState({ tintListRowsByAccount: true });
+    useEmailStore.setState({ isUnifiedView: true });
+    const orphan = makeEmail({ accountId: 'jmap-owner-id-with-no-entry', accountLabel: 'luca@lucazanon.it' });
+
+    const { container } = renderRow(orphan);
+    expect(row(container)!.className).toMatch(/bg-[a-z]+-\d+/);
+  });
+
+  it('gives different accounts different tints', () => {
+    useSettingsStore.setState({ tintListRowsByAccount: true });
+    useEmailStore.setState({ isUnifiedView: true });
+
+    const a = renderRow(makeEmail({ accountId: 'x', accountLabel: 'luca@insulaab.it' }));
+    const clsA = row(a.container)!.className.match(/bg-[a-z]+-\d+/)![0];
+    a.unmount();
+    const b = renderRow(makeEmail({ accountId: 'y', accountLabel: 'luca@lucazanon.it' }));
+    const clsB = row(b.container)!.className.match(/bg-[a-z]+-\d+/)![0];
+
+    expect(clsA).not.toBe(clsB);
+  });
+
+  it('outranks the tag tint', () => {
+    useSettingsStore.setState({ tintListRowsByAccount: true });
+    useEmailStore.setState({ isUnifiedView: true });
+    const tagged = makeEmail({
+      accountId: ACCOUNT_TEAL.id,
+      keywords: { $seen: true, [`$label:${DEFAULT_KEYWORDS[0].id}`]: true },
+    });
+
+    const { container } = renderRow(tagged);
+    expect(row(container)!.className).toContain('bg-teal-100');
+  });
+});
+
+describe('ThreadListItem selection in a merged view', () => {
+  // Unified and tag views stamp each email with its owning account, and the
+  // selection holds `emailKeyFor` keys. A bare-id check never matches them.
+  const stamp = { sourceClientAccountId: 'account-b', sourceAccountId: 'account-b' };
+
+  beforeEach(() => {
+    useSettingsStore.setState({
+      emailKeywords: [...DEFAULT_KEYWORDS],
+      showPreview: false,
+      mailLayout: 'split',
+      density: 'regular',
+    });
+    useEmailStore.setState({
+      isUnifiedView: true,
+      selectedEmailKeys: new Set<string>(),
+      lastSelectedEmailKey: null,
+      selectedMailbox: '',
+    });
+  });
+
+  it('shows a ticked stamped row as checked', () => {
+    const email = makeEmail({ ...stamp });
+    useEmailStore.setState({ emails: [email], selectedEmailKeys: new Set([emailKeyFor(email)]) });
+    renderRow(email);
+
+    expect(screen.getByRole('checkbox')).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('does not show a namesake row from another account as checked', () => {
+    const mine = makeEmail({ sourceClientAccountId: 'account-a', sourceAccountId: 'account-a' });
+    const theirs = makeEmail({ ...stamp });
+    useEmailStore.setState({ emails: [mine, theirs], selectedEmailKeys: new Set([emailKeyFor(mine)]) });
+    renderRow(theirs);
+
+    expect(screen.getByRole('checkbox')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('ticks a whole thread by key and shows it checked', () => {
+    const e1 = makeEmail({ id: 'e1', threadId: 't1', receivedAt: '2024-01-15T10:00:00Z', ...stamp });
+    const e2 = makeEmail({ id: 'e2', threadId: 't1', receivedAt: '2024-01-15T11:00:00Z', ...stamp });
+    useEmailStore.setState({ emails: [e1, e2] });
+    const [thread] = groupEmailsByThread([e1, e2]);
+    const ui = (
+      <ThreadListItem thread={thread} isExpanded={false} onToggleExpand={() => {}} onEmailSelect={() => {}} />
+    );
+    const { rerender } = render(ui);
+
+    act(() => {
+      screen.getByRole('checkbox').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const { selectedEmailKeys, lastSelectedEmailKey } = useEmailStore.getState();
+    expect([...selectedEmailKeys].sort()).toEqual([emailKeyFor(e1), emailKeyFor(e2)].sort());
+    expect(lastSelectedEmailKey).toBe(emailKeyFor(e2));
+    rerender(ui);
+    expect(screen.getByRole('checkbox')).toHaveAttribute('aria-checked', 'true');
+
+    act(() => {
+      screen.getByRole('checkbox').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(useEmailStore.getState().selectedEmailKeys.size).toBe(0);
+  });
+});
+
+describe('ThreadListItem Mountain View desktop row', () => {
+  beforeEach(() => {
+    useSettingsStore.setState({
+      emailKeywords: [...DEFAULT_KEYWORDS],
+      showPreview: true,
+      mailLayout: 'focus',
+      interfaceLayout: 'mountain-view',
+    } as never);
+    useEmailStore.setState({ selectedEmailKeys: new Set<string>(), selectedMailbox: 'inbox' });
+  });
+
+  it('runs the snippet on from the subject after a dash', () => {
+    const { container } = renderRow(makeEmail({ preview: 'See you there' }));
+    expect(container.textContent).toContain('Test Subject - See you there');
+  });
+
+  it('counts a thread after the names instead of in a pill, and opens it without unfolding', () => {
+    const onEmailSelect = vi.fn();
+    const onToggleExpand = vi.fn();
+    const emails = [
+      makeEmail({ id: 'a', receivedAt: '2024-01-15T10:00:00Z' }),
+      makeEmail({ id: 'b', receivedAt: '2024-01-15T11:00:00Z', from: [{ name: 'Bob', email: 'bob@example.com' }] }),
+    ];
+    const [thread] = groupEmailsByThread(emails);
+    const { container } = render(
+      <ThreadListItem thread={thread} isExpanded={false} onToggleExpand={onToggleExpand} onEmailSelect={onEmailSelect} />,
+    );
+
+    const names = container.querySelector('[data-mv-names]');
+    expect(names?.textContent).toMatch(/2$/);
+    fireEvent.click(screen.getByText('Test Subject'));
+    expect(onEmailSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }));
+    expect(onToggleExpand).not.toHaveBeenCalled();
+  });
+});
+
+describe('ThreadListItem prefetch on mouse press', () => {
+  const renderWithPrefetch = (onPrefetch: (email: Email) => void) => {
+    const [thread] = groupEmailsByThread([makeEmail()]);
+    return render(
+      <ThreadListItem thread={thread} isExpanded={false} onToggleExpand={() => {}} onEmailSelect={() => {}} onPrefetch={onPrefetch} />,
+    );
+  };
+
+  it('asks for the message when a mouse is pressed on the row', () => {
+    const onPrefetch = vi.fn();
+    renderWithPrefetch(onPrefetch);
+    fireEvent.pointerDown(screen.getByTestId('email-list-item'), { pointerType: 'mouse', button: 0 });
+    expect(onPrefetch).toHaveBeenCalledWith(expect.objectContaining({ id: 'email-1' }));
+  });
+
+  it('leaves touches, other buttons and presses on controls in the row alone', () => {
+    const onPrefetch = vi.fn();
+    renderWithPrefetch(onPrefetch);
+    const row = screen.getByTestId('email-list-item');
+    fireEvent.pointerDown(row, { pointerType: 'touch', button: 0 });
+    fireEvent.pointerDown(row, { pointerType: 'mouse', button: 2 });
+    fireEvent.pointerEnter(row);
+    const control = row.querySelector('button');
+    expect(control).not.toBeNull();
+    fireEvent.pointerDown(control!, { pointerType: 'mouse', button: 0 });
+    expect(onPrefetch).not.toHaveBeenCalled();
   });
 });

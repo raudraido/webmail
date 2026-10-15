@@ -22,7 +22,9 @@ import {
   RefreshCw,
   Upload,
   Users,
-} from "lucide-react";
+  EyeOff,
+} from "@/components/icons";
+import { FolderRulesSubMenu } from "@/components/email/rules-menu";
 
 interface Position {
   x: number;
@@ -90,6 +92,8 @@ interface MailboxContextMenuProps {
   onShareFolder?: (mailboxId: string) => void;
   onImportEmail?: (mailboxId: string) => void;
   onRefresh?: () => void;
+  /** Hide a shared account's mail folders from the sidebar (#1228). */
+  onHideSharedAccount?: (accountId: string) => void;
 }
 
 export function MailboxContextMenu({
@@ -110,6 +114,7 @@ export function MailboxContextMenu({
   onShareFolder,
   onImportEmail,
   onRefresh,
+  onHideSharedAccount,
 }: MailboxContextMenuProps) {
   const t = useTranslations("mailbox_context_menu");
 
@@ -147,6 +152,17 @@ export function MailboxContextMenu({
           onClick={() => handleAction(onRefresh!)}
           disabled={!onRefresh}
         />
+        {target.accountId && onHideSharedAccount && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              icon={EyeOff}
+              label={t("hide_shared_account")}
+              onClick={() => handleAction(() => onHideSharedAccount(target.accountId!))}
+              testId="mailbox-hide-shared-account"
+            />
+          </>
+        )}
       </ContextMenu>
     );
   }
@@ -214,6 +230,7 @@ export function MailboxContextMenu({
           testId="mailbox-share"
         />
       )}
+      <FolderRulesSubMenu mailbox={mailbox} onClose={onClose} />
 
       <ContextMenuSeparator />
 
