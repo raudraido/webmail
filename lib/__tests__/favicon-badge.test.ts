@@ -391,3 +391,27 @@ describe('renderBadgedFavicon', () => {
     expect(svg).toContain('viewBox="0 0 1000 1000"');
   });
 });
+
+describe('renderBadgedFavicon with a data-unread-node marker (majutaja.com)', () => {
+  const MARKED_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><style>.f{fill:#416180}</style><rect class="f" x="41" y="50" width="18" height="18"/><rect class="f" data-unread-node="" x="72" y="4" width="24" height="24"/></svg>`;
+
+  it('recolours only the marked element and draws no count pill', () => {
+    const out = decode(renderBadgedFavicon(MARKED_SVG, 5)!);
+    expect(out).toContain('style="fill:#e4572e"');
+    expect(out.match(/#e4572e/g)!.length).toBe(2); // attribute + style on the one node
+    expect(out).not.toContain('<text');
+    expect(out).not.toContain(FILL);
+    // the other square is untouched
+    expect(out).toMatch(/<rect class="f" x="41"/);
+  });
+
+  it('still returns null for a zero count', () => {
+    expect(renderBadgedFavicon(MARKED_SVG, 0)).toBeNull();
+  });
+
+  it('leaves bases without the marker on the stock pill', () => {
+    const out = decode(renderBadgedFavicon(BASE_SVG, 5)!);
+    expect(out).toContain('<text');
+    expect(out).not.toContain('#e4572e');
+  });
+});

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <style>
+    .m { fill: none; stroke: #416180; stroke-width: 11; stroke-linecap: square; }
+    .f { fill: #416180; }
+    @media (prefers-color-scheme: dark) { .m { stroke: #a9c4de; } .f { fill: #a9c4de; } }
+  </style>
+  <path class="m" d="M16 82V18l34 40 34-40v64H16z"/>
+  <rect class="f" x="41" y="50" width="18" height="18"/>
+  <!-- data-unread-node: lib/favicon-badge.ts recolours this square when there is unread mail -->
+  <rect class="f" data-unread-node="" x="72" y="4" width="24" height="24"/>
+</svg>

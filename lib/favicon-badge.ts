@@ -24,6 +24,11 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const BADGE_FILL = '#af1d3f';
 const BADGE_RING = '#ffffff';
 const BADGE_TEXT_FILL = '#ffffff';
+// majutaja.com addition: a base icon may mark one element `data-unread-node`.
+// With unread mail that element is recoloured to this accent and no count pill
+// is drawn (the installed-app icon still gets the OS count via setAppBadge).
+// Bases without the marker get the stock pill, so upstream behaviour is intact.
+const UNREAD_NODE_FILL = '#e4572e';
 const BADGE_FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
 // Geometry, as fractions of the icon's own coordinate span so it lands
@@ -86,6 +91,15 @@ function sanitiseSvg(doc: Document): void {
   });
 }
 
+// Percent-encoding rather than base64: btoa throws on any character outside
+// Latin-1, which a branded SVG may well contain. encodeURIComponent itself
+// throws on an unpaired surrogate, so callers guard this in their try/catch. It
+// must be encodeURIComponent, not encodeURI: the latter leaves "#" bare, and a
+// bare "#" in a colour truncates the data URL at the first fill.
+function toDataUrl(doc: Document): string {
+  return `data:image/svg+xml,${encodeURIComponent(new XMLSerializer().serializeToString(doc))}`;
+}
+
 /**
  * Composes an unread badge over an SVG favicon and returns it as a data URL.
  *
@@ -125,6 +139,15 @@ export function renderBadgedFavicon(baseSvgSource: string, count: number): strin
     // at any size it asks for.
     root.setAttribute('width', '16');
     root.setAttribute('height', '16');
+
+    const unreadNode = root.querySelector('[data-unread-node]');
+    if (unreadNode) {
+      // Attribute as fallback, style as the guarantee: a stylesheet class in the
+      // base (`.f { fill: ... }`) would otherwise win over a presentation attribute.
+      unreadNode.setAttribute('fill', UNREAD_NODE_FILL);
+      unreadNode.setAttribute('style', `fill:${UNREAD_NODE_FILL}`);
+      return toDataUrl(doc);
+    }
 
     // Normalise the viewBox to a square, centred on the original, before doing
     // any badge maths. Sizing the badge off min(width, height) double-penalised
@@ -219,14 +242,7 @@ export function renderBadgedFavicon(baseSvgSource: string, count: number): strin
     root.appendChild(fillRect);
     root.appendChild(text);
 
-    const serialised = new XMLSerializer().serializeToString(doc);
-
-    // Percent-encoding rather than base64: btoa throws on any character outside
-    // Latin-1, which a branded SVG may well contain. encodeURIComponent itself
-    // throws on an unpaired surrogate, so this whole tail is guarded. It must be
-    // encodeURIComponent, not encodeURI: the latter leaves "#" bare, and a bare
-    // "#" in a colour truncates the data URL at the first fill.
-    return `data:image/svg+xml,${encodeURIComponent(serialised)}`;
+    return toDataUrl(doc);
   } catch {
     return null;
   }
