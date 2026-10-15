@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 
 vi.mock('next-intl', () => ({
   useTranslations: () => (key: string) => key,
+  useLocale: () => 'en',
 }));
 vi.mock('@/i18n/detect-locale', () => ({ getEffectiveLocale: () => 'de' }));
 
