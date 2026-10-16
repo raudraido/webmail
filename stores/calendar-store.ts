@@ -25,9 +25,17 @@ import { generateUUID } from '@/lib/utils';
 import { apiFetch } from '@/lib/browser-navigation';
 import { explainServerAuthError } from '@/lib/server-auth-status';
 import { BIRTHDAY_CALENDAR_ID } from '@/lib/birthday-calendar';
+import { sortCalendars, sortOrderUpdates } from '@/lib/calendar-sort';
 import { getClientByLocalAccountId } from './client-registry';
 import { calendarHooks } from '@/lib/plugin-hooks';
 import { eventToView } from '@/lib/plugin-projection';
+import {
+  parseSyncedSubscriptions,
+  parseSubscriptionTombstones,
+  mergeSyncedSubscriptions,
+  subscriptionOwnerFor,
+} from '@/lib/calendar-subscription-sync';
+import { registerCalendarSubscriptionSyncBridge } from './settings-store';
 
 /**
  * When the Pro shell aggregates calendars/events from every connected
@@ -45,6 +53,19 @@ function resolveAccountClient<T extends IJMAPClient>(active: T, localAccountId?:
   if (!localAccountId) return active;
   const lookup = getClientByLocalAccountId(localAccountId) as T | undefined;
   return lookup ?? active;
+}
+
+/**
+ * A new calendar without a sortOrder gets 0 and, once the user has reordered
+ * the account's calendars (1, 2, 3...), would jump to the top. Give it the
+ * next number instead, so it lands after the user's own calendars.
+ */
+function withNextSortOrder<T extends Partial<Calendar>>(client: IJMAPClient, calendars: Calendar[], calendar: T): T {
+  if (calendar.sortOrder !== undefined) return calendar;
+  const highest = Math.max(0, ...calendars
+    .filter((c) => !c.isShared && resolveAccountClient(client, c.localAccountId) === client)
+    .map((c) => c.sortOrder ?? 0));
+  return highest > 0 ? { ...calendar, sortOrder: highest + 1 } : calendar;
 }
 
 /**
@@ -496,7 +517,7 @@ function getStoreEventDebugSnapshot(event: Partial<CalendarEvent> | null | undef
 
 /** Identifies the login a subscription belongs to: server plus login name. */
 export function subscriptionOwner(client: Pick<IJMAPClient, 'getServerUrl' | 'getUsername'>): string {
-  return `${client.getServerUrl().replace(/\/+$/, '').toLowerCase()}|${client.getUsername().toLowerCase()}`;
+  return subscriptionOwnerFor(client.getServerUrl(), client.getUsername());
 }
 
 type CalendarStoreSet = (partial: Partial<CalendarStore> | ((state: CalendarStore) => Partial<CalendarStore>)) => void;
@@ -548,6 +569,7 @@ export interface ICalSubscription {
   color: string;
   refreshInterval: number; // minutes
   lastRefreshed: string | null;
+  updatedAt?: string;
 }
 
 /**
@@ -595,6 +617,8 @@ interface CalendarStore {
   rsvpEvent: (client: IJMAPClient, eventId: string, participantId: string, status: string, replyTo?: Record<string, string> | null, scope?: 'occurrence' | 'series') => Promise<boolean>;
   importEvents: (client: IJMAPClient, events: Partial<CalendarEvent>[], calendarId: string) => Promise<number | null>;
   updateCalendar: (client: IJMAPClient, calendarId: string, updates: Partial<Calendar>) => Promise<void>;
+  /** Store `orderedIds` in that order by renumbering their sortOrder. */
+  reorderCalendars: (client: IJMAPClient, orderedIds: string[]) => Promise<void>;
   setDefaultCalendar: (client: IJMAPClient, calendarId: string) => Promise<void>;
   shareCalendar: (client: IJMAPClient, calendarId: string, principalId: string, rights: CalendarRights | null) => Promise<void>;
   createCalendar: (client: IJMAPClient, calendar: Partial<Calendar>, options?: CreateCalendarOptions) => Promise<Calendar | null>;
@@ -608,6 +632,7 @@ interface CalendarStore {
 
   // iCal subscriptions
   icalSubscriptions: ICalSubscription[];
+  deletedSubscriptionIds: Record<string, string>;
   addICalSubscription: (client: IJMAPClient, url: string, name: string, color: string, refreshInterval?: number) => Promise<ICalSubscription | null>;
   updateICalSubscription: (client: IJMAPClient, subscriptionId: string, updates: { url?: string; name?: string; color?: string; refreshInterval?: number }) => Promise<void>;
   removeICalSubscription: (client: IJMAPClient, subscriptionId: string) => Promise<void>;
@@ -618,6 +643,12 @@ interface CalendarStore {
   clearICalSubscriptions: () => void;
   refreshAllSubscriptions: (client: IJMAPClient) => Promise<void>;
   isSubscriptionCalendar: (calendarId: string) => boolean;
+
+  applySyncedState: (
+    subscriptions: unknown,
+    deletedSubscriptionIds: unknown,
+    opts: { merge: boolean; owner?: string }
+  ) => void;
 }
 
 const initialState = {
@@ -633,6 +664,7 @@ const initialState = {
   error: null as string | null,
   dateRange: null as { start: string; end: string } | null,
   icalSubscriptions: [] as ICalSubscription[],
+  deletedSubscriptionIds: {} as Record<string, string>,
 };
 
 function getSafeCalendarViewMode(value: unknown): CalendarViewMode {
@@ -674,7 +706,8 @@ export const useCalendarStore = create<CalendarStore>()(
         try {
           // Throws when the primary account fails, so a failed fetch leaves the
           // list and the selection as they were.
-          const { calendars, failedAccountIds } = await client.getAllCalendarsWithFailures();
+          const { calendars: fetched, failedAccountIds } = await client.getAllCalendarsWithFailures();
+          const calendars = sortCalendars(fetched);
           // Default the visible selection to event calendars only - tasks-only
           // calendars stay out of the event grid.
           const defaultSelected = calendars.filter(c => !c.isTasksOnly).map(c => c.id);
@@ -752,7 +785,7 @@ export const useCalendarStore = create<CalendarStore>()(
               }
             }),
           );
-          const calendars = results.flat();
+          const calendars = sortCalendars(results.flat());
           set({
             calendars,
             isLoading: false,
@@ -1122,15 +1155,45 @@ export const useCalendarStore = create<CalendarStore>()(
           client = resolveAccountClient(client, cal?.localAccountId);
           await client.updateCalendar(realId, updates, targetAccountId);
           set((state) => ({
-            calendars: state.calendars.map(c =>
+            calendars: sortCalendars(state.calendars.map(c =>
               c.id === calendarId ? { ...c, ...updates } : c
-            ),
+            )),
           }));
           void calendarHooks.onCalendarChange.emit({ calendarId, change: 'updated' });
         } catch (error) {
           debug.error('Failed to update calendar:', error);
           set({ error: 'Failed to update calendar' });
           throw error;
+        }
+      },
+
+      reorderCalendars: async (client, orderedIds) => {
+        const updates = sortOrderUpdates(get().calendars, orderedIds);
+        if (updates.length === 0) return;
+        const before = get().calendars;
+        const withSortOrders = (sortOrders: Map<string, number>) => sortCalendars(before.map((c) =>
+          sortOrders.has(c.id) ? { ...c, sortOrder: sortOrders.get(c.id)! } : c
+        ));
+        // Optimistic, so the list moves at once.
+        set({ error: null, calendars: withSortOrders(new Map(updates.map((u) => [u.id, u.sortOrder]))) });
+        const saved = new Map<string, number>();
+        try {
+          for (const { id, sortOrder } of updates) {
+            const cal = before.find(c => c.id === id);
+            const realId = cal?.originalId || stripLocalAccountPrefix(id, cal?.localAccountId);
+            await resolveAccountClient(client, cal?.localAccountId).updateCalendar(realId, { sortOrder }, cal?.accountId);
+            saved.set(id, sortOrder);
+          }
+        } catch (error) {
+          debug.error('Failed to reorder calendars:', error);
+          // Show the order the server now holds: the moves saved before the
+          // failure stay, the rest are undone.
+          set({ error: 'Failed to reorder calendars', calendars: withSortOrders(saved) });
+          throw error;
+        } finally {
+          for (const calendarId of saved.keys()) {
+            void calendarHooks.onCalendarChange.emit({ calendarId, change: 'updated' });
+          }
         }
       },
 
@@ -1193,11 +1256,11 @@ export const useCalendarStore = create<CalendarStore>()(
       createCalendar: async (client, calendar, options) => {
         set({ error: null });
         try {
-          const created = await client.createCalendar(calendar, undefined, options);
+          const created = await client.createCalendar(withNextSortOrder(client, get().calendars, calendar), undefined, options);
           // Added with its raw id; the next aggregated refetch namespaces it and
           // reconcileSelectedIds() remaps the selection so it stays visible.
           set((state) => ({
-            calendars: [...state.calendars, created],
+            calendars: sortCalendars([...state.calendars, created]),
             selectedCalendarIds: [...state.selectedCalendarIds, created.id],
           }));
           void calendarHooks.onCalendarChange.emit({ calendarId: created.id, change: 'created' });
@@ -1347,14 +1410,15 @@ export const useCalendarStore = create<CalendarStore>()(
 
         let calendar: Calendar | null = null;
         try {
-          calendar = await client.createCalendar({
+          calendar = await client.createCalendar(withNextSortOrder(client, get().calendars, {
             name,
             color,
             isVisible: true,
             isSubscribed: true,
-          });
+          }));
           if (!calendar) throw new Error('Failed to create calendar');
 
+          const now = new Date().toISOString();
           const subscription: ICalSubscription = {
             id: generateUUID(),
             url: normalizedUrl,
@@ -1365,13 +1429,18 @@ export const useCalendarStore = create<CalendarStore>()(
             color,
             refreshInterval,
             lastRefreshed: null,
+            updatedAt: now,
           };
 
-          set((state) => ({
-            calendars: [...state.calendars, calendar!],
-            selectedCalendarIds: [...state.selectedCalendarIds, calendar!.id],
-            icalSubscriptions: [...state.icalSubscriptions, subscription],
-          }));
+          set((state) => {
+            const { [subscription.id]: _, ...remainingTombstones } = state.deletedSubscriptionIds;
+            return {
+              calendars: sortCalendars([...state.calendars, calendar!]),
+              selectedCalendarIds: [...state.selectedCalendarIds, calendar!.id],
+              icalSubscriptions: [...state.icalSubscriptions, subscription],
+              deletedSubscriptionIds: remainingTombstones,
+            };
+          });
 
           // Initial fetch - roll back the calendar create if it fails so we
           // don't leave a phantom calendar around after a bad URL / 404 / etc.
@@ -1429,17 +1498,21 @@ export const useCalendarStore = create<CalendarStore>()(
         }
 
         // Update local subscription record
-        const updated = { ...sub, ...normalizedUpdates };
+        const updated: ICalSubscription = {
+          ...sub,
+          ...normalizedUpdates,
+          updatedAt: new Date().toISOString(),
+        };
         set((state) => ({
           icalSubscriptions: state.icalSubscriptions.map(s => s.id === subscriptionId ? updated : s),
-          calendars: state.calendars.map(c => {
+          calendars: sortCalendars(state.calendars.map(c => {
             if (c.id !== sub.calendarId) return c;
             return {
               ...c,
               ...(normalizedUpdates.name ? { name: normalizedUpdates.name } : {}),
               ...(normalizedUpdates.color ? { color: normalizedUpdates.color } : {}),
             };
-          }),
+          })),
         }));
         void calendarHooks.onICalSubscriptionChange.emit({ subscriptionId, change: 'updated' });
 
@@ -1464,13 +1537,49 @@ export const useCalendarStore = create<CalendarStore>()(
           }
         }
 
+        const now = new Date().toISOString();
         set((state) => ({
           icalSubscriptions: state.icalSubscriptions.filter(s => s.id !== subscriptionId),
+          deletedSubscriptionIds: { ...state.deletedSubscriptionIds, [subscriptionId]: now },
           calendars: state.calendars.filter(c => c.id !== sub.calendarId),
           selectedCalendarIds: state.selectedCalendarIds.filter(id => id !== sub.calendarId),
           events: state.events.filter(e => !e.calendarIds?.[sub.calendarId]),
         }));
         void calendarHooks.onICalSubscriptionChange.emit({ subscriptionId, change: 'removed' });
+      },
+
+      applySyncedState: (subscriptions, deletedSubscriptionIds, opts) => {
+        const parsed = parseSyncedSubscriptions(subscriptions);
+        if (parsed === null) return;
+        // A server blob speaks only for its own login. Older blobs may still
+        // carry other logins' subscriptions; unowned ones stay and are
+        // adopted by claimSubscription() only if their calendar is found.
+        const parsedSubs = opts.owner
+          ? parsed.filter((s) => !s.owner || s.owner === opts.owner)
+          : parsed;
+        const parsedTombstones = parseSubscriptionTombstones(deletedSubscriptionIds);
+
+        if (opts.merge) {
+          const merged = mergeSyncedSubscriptions(
+            {
+              icalSubscriptions: get().icalSubscriptions,
+              deletedSubscriptionIds: get().deletedSubscriptionIds,
+            },
+            {
+              icalSubscriptions: parsedSubs,
+              deletedSubscriptionIds: parsedTombstones,
+            }
+          );
+          set({
+            icalSubscriptions: merged.icalSubscriptions,
+            deletedSubscriptionIds: merged.deletedSubscriptionIds,
+          });
+        } else {
+          set({
+            icalSubscriptions: parsedSubs,
+            deletedSubscriptionIds: parsedTombstones,
+          });
+        }
       },
 
       refreshICalSubscription: async (client, subscriptionId) => {
@@ -1627,10 +1736,12 @@ export const useCalendarStore = create<CalendarStore>()(
         // They're now scoped per-account via sub.accountId - wiping them
         // here would lose them from localStorage on every switch.
         const preservedSubs = get().icalSubscriptions;
+        const preservedTombstones = get().deletedSubscriptionIds;
         set({
           ...initialState,
           selectedDate: displayNow(),
           icalSubscriptions: preservedSubs,
+          deletedSubscriptionIds: preservedTombstones,
         });
         import('./calendar-notification-store').then(({ useCalendarNotificationStore }) => {
           useCalendarNotificationStore.getState().clearAll();
@@ -1655,6 +1766,7 @@ export const useCalendarStore = create<CalendarStore>()(
         selectedCalendarIds: state.selectedCalendarIds,
         viewMode: state.viewMode,
         icalSubscriptions: state.icalSubscriptions,
+        deletedSubscriptionIds: state.deletedSubscriptionIds,
       }),
     }
   )
@@ -1858,3 +1970,26 @@ async function importEventsUnhooked(
 
   return imported + linked;
 }
+
+registerCalendarSubscriptionSyncBridge(
+  {
+    getSyncedState: () => ({
+      icalSubscriptions: useCalendarStore.getState().icalSubscriptions,
+      deletedSubscriptionIds: useCalendarStore.getState().deletedSubscriptionIds,
+    }),
+    applySyncedState: (subscriptions, deletedSubscriptionIds, opts) => {
+      useCalendarStore.getState().applySyncedState(subscriptions, deletedSubscriptionIds, opts);
+    },
+  },
+  // The calendar store changes on every navigation and event load; only a
+  // change to the synced subscription state should schedule a settings push.
+  (listener) => useCalendarStore.subscribe((state, prev) => {
+    if (
+      state.icalSubscriptions !== prev.icalSubscriptions ||
+      state.deletedSubscriptionIds !== prev.deletedSubscriptionIds
+    ) {
+      listener();
+    }
+  })
+);
+
