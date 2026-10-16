@@ -173,6 +173,21 @@ export function AboutDataSettings() {
             {sourceCodeUrl ? t('about.source_code') : 'GitHub'} <ExternalLink className="w-3 h-3" />
           </a>
         </div>
+        {/* majutaja.com: when rebranded, keep crediting the upstream project (AGPL-3.0). Uses
+            only the existing about.title key (the product name) so no locale needs a new string. */}
+        {branded && (
+          <p className="mt-3 text-xs text-muted-foreground">
+            <a
+              href={UPSTREAM_SOURCE_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-foreground transition-colors"
+            >
+              {t('about.title')}
+            </a>{' '}
+            · AGPL-3.0
+          </p>
+        )}
       </div>
 
       <SettingsSection title={t('title')} description={t('description')}>
