@@ -60,6 +60,12 @@
     "demo_login_button": "Käivita demo",
     "demo_tagline": "Proovi täisfunktsionaalset e-posti klienti. Kontot pole vaja.",
     "demo_no_signup": "Registreerimist pole vaja - tutvu vabalt näidisandmetega",
+    "mobile_handoff": {
+      "title": "Open the Bulwark mobile app?",
+      "description": "This sign-in page was opened by an app on this device. Your sign-in for {username} will be handed to the app that registered the Bulwark link. Continue only if you started this from the Bulwark mobile app.",
+      "confirm": "Hand over to the app",
+      "cancel": "Stay in the webmail"
+    },
     "oauth_completing": "Sisselogimise lõpetamine...",
     "oauth_error": {
       "title": "Autentimine ebaõnnestus",
@@ -142,6 +148,8 @@
     "show_all_tags": "Näita kõiki ({count})",
     "show_fewer_tags": "Näita vähem",
     "folders": "Kaustad",
+    "your_folders": "Sinu kaustad",
+    "create_folder": "Loo kaust",
     "show_more": "Rohkem",
     "show_fewer": "Vähem",
     "shared": "Jagatud",
@@ -236,6 +244,13 @@
     "show_on_mobile": "Näita mobiilis"
   },
   "email_list": {
+    "columns": {
+      "from": "Saatja",
+      "to": "Saaja",
+      "subject": "Teema",
+      "date": "Kuupäev",
+      "size": "Suurus"
+    },
     "no_emails": "Sõnumeid ei leitud",
     "no_emails_description": "See postkast on tühi",
     "no_search_results": "Tulemusi ei leitud",
@@ -613,7 +628,9 @@
       "not_in_contacts": "Ei ole sinu kontaktides",
       "add_to_contacts": "Lisa kontaktidesse",
       "copied": "Kopeeritud!",
-      "copy_failed": "Kopeerimine ebaõnnestus"
+      "copy_failed": "Kopeerimine ebaõnnestus",
+      "view_contact": "Kuva kontakt",
+      "view_details": "Kuva üksikasjad"
     },
     "send_now": "Saada kohe",
     "verification_code": {
@@ -623,9 +640,11 @@
     },
     "mv_position": "{index} / {total}",
     "plugin_panel_show": "Näita pistikprogrammi paneeli",
-    "plugin_panel_hide": "Peida pistikprogrammi paneel"
+    "plugin_panel_hide": "Peida pistikprogrammi paneel",
+    "copy": "Kopeeri"
   },
   "email_composer": {
+    "select_from_directory": "Vali kataloogist",
     "minimize": "Minimeeri",
     "maximize": "Täisekraan",
     "restore": "Taasta",
@@ -712,6 +731,10 @@
     "option_dsn_hint": "Saa aruanne, kui server kirja kohale toimetab",
     "option_require_tls": "Nõua krüpteeritud kohaletoimetamist",
     "option_require_tls_hint": "Toimeta kohale ainult TLS-iga, muidu lükka tagasi",
+    "option_priority": "Prioriteet",
+    "option_priority_high": "Kõrge",
+    "option_priority_normal": "Tavaline",
+    "option_priority_low": "Madal",
     "validation": {
       "recipient_required": "Saatmiseks lisa saaja",
       "body_required": "Kirjuta sõnum või lisa fail",
@@ -780,6 +803,9 @@
     "autocomplete_search_server": "Otsi serverist",
     "autocomplete_searching": "Otsimine...",
     "mention_recipients": "Adressaadid",
+    "mention_card_not_recipient": "Pole väljal Saajale ega CC, seega seda kirja ei saa.",
+    "mention_card_add": "Lisa väljale {field}",
+    "mention_card_remove": "Eemalda mainimine",
     "toolbar": {
       "bold": "Rasvane",
       "italic": "Kaldkiri",
@@ -818,7 +844,9 @@
     },
     "send_filing_warning": "Saadetud - kuid saatmisjärgne koristus ebaõnnestus, mustand võib alles jääda.",
     "pop_out": "Ava vastus eraldi aknas",
-    "send_guard_failed": "Ei saadetud - kirju enne saatmist kontrolliv pistikprogramm ebaõnnestus või ei vastanud."
+    "send_guard_failed": "Ei saadetud - kirju enne saatmist kontrolliv pistikprogramm ebaõnnestus või ei vastanud.",
+    "cut": "Lõika",
+    "copy": "Kopeeri"
   },
   "confirm_dialog": {
     "confirm": "Kinnita",
@@ -875,6 +903,8 @@
     "emails_moved": "{count} e-kirja liigutati",
     "moved_to_mailbox": "Liigutatud kausta {mailbox}",
     "move_failed": "Liigutamine ebaõnnestus",
+    "removed_from_folder": "Eemaldatud kaustast {mailbox}",
+    "remove_from_folder_failed": "Sellest kaustast ei õnnestunud eemaldada",
     "emails_copied": "{count} kirja kopeeritud",
     "copy_failed": "Kopeerimine ebaõnnestus",
     "move_error": "E-kirju ei õnnestunud valitud kausta liigutada",
@@ -996,34 +1026,22 @@
     "search_no_results": "Vastavaid seadeid ei leitud",
     "tabs": {
       "appearance": "Välimus",
-      "language": "Keel, piirkond ja kellaaeg",
-      "email": "E-kirjade käitumine",
-      "composer": "Kirja koostamine",
-      "privacy": "Privaatsus ja turvalisus",
       "account": "Konto",
-      "identities": "Identiteedid",
       "vacation": "Puhkusevastaja",
-      "advanced": "Täpsemalt",
       "calendar": "Kalender",
       "filters": "Filtrid",
-      "templates": "Mallid",
       "folders": "Kaustad",
-      "keywords": "Sildid",
       "security": "Turvalisus",
       "files": "Failid",
       "contacts": "Kontaktid",
-      "encryption": "Krüpteerimine",
-      "protocol_handlers": "Vaikerakendused",
-      "sidebar_apps": "Külgriba rakendused",
       "notifications": "Teavitused",
-      "layout": "Paigutus",
-      "themes": "Teemad",
       "reading": "Lugemine",
       "composing": "Kirjutamine",
-      "downloads": "Allalaadimised",
-      "content_senders": "Sisu ja saatjad",
-      "about_data": "Teave ja andmed",
-      "debug": "Silumine"
+      "message_list": "Kirjade loend",
+      "general": "Üldine",
+      "organize": "Kaustad ja sildid",
+      "addons": "Lisad",
+      "backup": "Varundus ja lähtestamine"
     },
     "themes": {
       "title": "Teemad",
@@ -1035,18 +1053,13 @@
       "default_restored": "Vaiketeema taastatud",
       "default_name": "Vaikimisi",
       "default_badge": "Vaikimisi",
-      "admin_enforced": "Administraatori määratud"
+      "admin_enforced": "Administraatori määratud",
+      "show_all": "Kuva kõik {count} teemat",
+      "show_fewer": "Kuva vähem"
     },
     "tab_groups": {
-      "general": "Üldine",
-      "account": "Konto ja identiteet",
-      "organization": "Kirjade korraldamine",
       "apps": "Rakendused",
-      "system": "Süsteem",
-      "appearance": "Välimus",
-      "mail": "Post",
-      "privacy": "Privaatsus ja turvalisus",
-      "advanced": "Täpsemalt"
+      "mail": "Post"
     },
     "appearance": {
       "message_list_order": {
@@ -1181,10 +1194,6 @@
         "label": "Värvi loendirida sildi värviga",
         "description": "Tooni iga kirja rida selle esimese sildi värviga. Lülita välja, et read jääksid tavalised; sildipunktid ja -märgised näitavad värvi ikkagi."
       },
-      "tint_list_rows_by_account": {
-        "label": "Toonita nimekirja read konto värviga",
-        "description": "Ühendatud vaates varjuta iga rida konto värviga konto punkti näitamise asemel. Sellel on eelis sildi värvi ees; sildid säilitavad oma värvi oma märgistel."
-      },
       "show_folder_total_count": {
         "label": "Näita kirjade koguarvu",
         "description": "Näita kaustade ja siltide kõrval kirjade koguarvu koos lugemata arvuga. Lülita välja, et näidata ainult lugemata arvu."
@@ -1214,6 +1223,21 @@
       "cross_all": {
         "label": "Kõik kirjad",
         "description": "Kuva ühendatud postkastis kirje Kõik kirjad, mis loetleb kõik valitud kaustade kirjad."
+      },
+      "sections": {
+        "text": "Tekst ja liikumine",
+        "layout": "Paigutus",
+        "sidebar": "Külgriba",
+        "accounts": "Mitu kontot",
+        "accounts_description": "Kuidas sinu kontod ja jagatud postkastid koos kuvatakse.",
+        "experimental": "Katseline"
+      },
+      "account_marker": {
+        "label": "Kontode eristamine",
+        "description": "Ühendatud vaadetes märgi iga kiri selle konto värviga, kust see tuli.",
+        "dot": "Värviline täpp",
+        "tint": "Toonitud rida",
+        "none": "Mitte midagi"
       }
     },
     "keywords": {
@@ -1233,6 +1257,7 @@
       "cancel": "Tühista",
       "migrating": "Sildi uuendamine olemasolevatel kirjadel…",
       "migration_error": "Sildi uuendamine olemasolevatel kirjadel ebaõnnestus",
+      "filters_migration_error": "Mõned filtrireeglid kasutavad endiselt vana silti: uuenda need käsitsi",
       "nesting": {
         "label": "Pesastatud sildid",
         "description": "Pesasta silte teiste siltide alla ja kuva neid külgribal puuna."
@@ -1340,9 +1365,7 @@
         "enabled": "Sündmuste teavitused",
         "enabled_desc": "Kuva märguanded eelseisvate kalendrisündmuste kohta",
         "sound": "Teavitusheli",
-        "sound_desc": "Mängi helimärguanne kalendri meeldetuletuste puhul",
-        "invitation_parsing": "Tuvasta e-kirjade kutsed",
-        "invitation_parsing_desc": "Tuvasta kalendrikutsed e-kirjade manustest ja kuva kalenditoimingud"
+        "sound_desc": "Mängi helimärguanne kalendri meeldetuletuste puhul"
       }
     },
     "language_region": {
@@ -1466,6 +1489,10 @@
         "horizontal": "Lugemispaan all",
         "horizontal_description": "Kuva kirjade loend üleval ja ava valitud kiri selle all olevas lugemispaanis."
       },
+      "list_columns": {
+        "label": "Näita loendit veergudena",
+        "description": "Näitab üherealisi ridu tabelina, mille päise all on veerud Saatja, Teema, Kuupäev ja Suurus."
+      },
       "show_preview": {
         "label": "Kuva eelvaate tekst",
         "description": "Kuva e-kirja eelvaade loendis",
@@ -1474,10 +1501,6 @@
       "show_verification_codes": {
         "label": "Näita kinnituskoode",
         "description": "Paku sisselogimis- ja kinnituskirjade koodi ühe klõpsuga kopeerimiseks, nimekirjas ühe päeva jooksul ja kirjas endas"
-      },
-      "disable_threading": {
-        "label": "Keela vestluste rühmitamine",
-        "description": "Kuva e-kirjad üksikute kirjadena vestluste kaupa rühmitamise asemel"
       },
       "plain_text_mode": {
         "label": "Ainult lihttekst",
@@ -1607,6 +1630,13 @@
         "label": "Maini adressaate @-ga",
         "description": "Kirjas @ trükkimine pakub selle adressaate ja lisab valitu eesnime. Enter või Tab valib esiletõstetud nime."
       },
+      "mention_adds_recipient": {
+        "label": "Kontaktid @-mainimistes",
+        "description": "@ kirjutamisel pakutakse ka sinu kontakte ja kataloogis olevaid inimesi. Kui valid kellegi, kes pole veel adressaat, lisatakse ta kirjale.",
+        "to": "Lisa väljale Saajale",
+        "cc": "Lisa väljale CC",
+        "off": "Paku ainult adressaate"
+      },
       "hide_inline_image_attachments": {
         "label": "Peida reasisesed pildid manuste hulgast",
         "description": "Kirja sisusse põimitud pilte ei kuvata eraldi manustena"
@@ -1645,51 +1675,15 @@
       "rtl_editing": {
         "label": "Paremalt vasakule kirjutamise tugi",
         "description": "Lisab koostamise tööriistaribale suunanupu, millega saad määrata lõigud vasakult paremale või paremalt vasakule"
-      }
-    },
-    "composer": {
-      "title": "Koostamine",
-      "description": "Seadista kirja koostamise sätteid",
-      "autosave": {
-        "label": "Automaatsalvestuse intervall",
-        "description": "Kui sageli mustandeid automaatselt salvestatakse",
-        "30s": "Iga 30 sekundi järel",
-        "1m": "Iga minuti järel",
-        "2m": "Iga 2 minuti järel",
-        "5m": "Iga 5 minuti järel"
       },
-      "send_confirmation": {
-        "label": "Saatmise kinnitus",
-        "description": "Küsi kinnitust enne kirjade saatmist"
+      "group_conversations": {
+        "label": "Rühmita kirjad vestluse kaupa",
+        "description": "Näita vastuseid koos ühe vestlusena, mitte eraldi kirjadena."
       },
-      "default_reply": {
-        "label": "Vaikimisi vastamisrežiim",
-        "description": "Vaikimisi toiming vastamisel klõpsates",
-        "reply": "Vasta",
-        "reply_all": "Vasta kõigile"
-      }
-    },
-    "privacy": {
-      "title": "Privaatsus ja turvalisus",
-      "description": "Halda oma privaatsuse ja turvalisuse sätteid",
-      "external_images": {
-        "label": "Blokeeri välised pildid",
-        "description": "Väldi jälgimist väliste piltide kaudu"
-      },
-      "session_timeout": {
-        "label": "Seansi aegumine",
-        "description": "Logi automaatselt välja pärast tegevusetust",
-        "never": "Mitte kunagi",
-        "30m": "30 minutit",
-        "1h": "1 tund",
-        "4h": "4 tundi"
-      },
-      "clear_cache": {
-        "label": "Tühjenda vahemälu",
-        "description": "Eemalda vahemällu salvestatud andmed ja ajutised failid",
-        "button": "Tühjenda vahemälu",
-        "confirm": "Kas oled kindel, et soovid vahemälu tühjendada?",
-        "success": "Vahemälu tühjendati edukalt"
+      "signatures_link": {
+        "label": "Allkirjad",
+        "description": "Igal e-posti aadressil on oma allkiri. Muuda neid koos oma aadressidega.",
+        "button": "E-posti aadressid"
       }
     },
     "account": {
@@ -1735,6 +1729,7 @@
       "backup": {
         "title": "Kontode nimekirja varukoopia",
         "description": "Hoia selle brauseri kontode nimekirja serveris, krüpteeritult parooliga, mida tead ainult sina, ja too see tagasi teises seadmes. Postkastide paroole ei salvestata: igasse taastatud kontosse logid ise sisse.",
+        "description_passwords": "Hoia selle brauseri kontode nimekirja serveris, krüpteeritult parooliga, mida tead ainult sina, ja too see tagasi teises seadmes. Soovi korral saad lisada ka postkastide paroolid, nii et taastatud kontod logivad ise sisse.",
         "status_none": "Kontole {account} pole nimekirja salvestatud.",
         "status_saved": "Kontole {account} on nimekiri salvestatud.",
         "save": "Salvesta nimekiri",
@@ -1746,9 +1741,15 @@
         "password_hint": "Vähemalt 10 märki. Seda ei saa taastada: kui unustad, salvesta nimekiri uuesti uue parooliga.",
         "restore_hint": "Parool, mille valisid nimekirja salvestamisel.",
         "confirm": "Kinnita parool",
+        "include_passwords": "Lisa postkastide paroolid",
+        "include_passwords_hint": "Siin parooliga sisse logitud kontod logivad pärast taastamist ise sisse. Igaüks, kes teab varukoopia parooli, pääseb ligi kõigile nimekirja postkastidele.",
         "saved": "Nimekiri salvestatud ({count, plural, one {# konto} other {# kontot}}).",
         "restored": "Lisatud kontosid: {added}. Juba olemasolevaid ja uuendatud kontosid: {updated}. Sisselogimiseks ava iga uus konto kontode nimekirjast.",
+        "restored_signed_in": "Lisatud kontosid: {added}. Juba olemasolevaid ja uuendatud kontosid: {updated}.",
         "skipped": "{count, plural, one {# kontot} other {# kontot}} ei lisatud: kontode piir on täis.",
+        "saved_passwords": "Paroolid lisatud {count, plural, one {# kontole} other {# kontole}}.",
+        "signed_in": "Salvestatud parooliga logiti sisse {count, plural, one {# kontosse} other {# kontosse}}.",
+        "sign_in_failed": "{count, plural, one {# salvestatud parool lükati tagasi} other {# salvestatud parooli lükati tagasi}}: logi neisse kontodesse kontode nimekirjast sisse.",
         "deleted": "Salvestatud nimekiri kustutatud.",
         "errors": {
           "mismatch": "Paroolid ei kattu.",
@@ -1763,6 +1764,9 @@
         "title": "Minuga jagatud",
         "description": "Grupi- ja jagatud kontod, mida saad hallata. Vali üks, et muuta selle filtreid, puhkusevastust, kalendreid ja kontakte.",
         "shared_label": "Jagatud konto"
+      },
+      "sections": {
+        "addresses": "E-posti aadressid"
       }
     },
     "scoped": {
@@ -1914,10 +1918,14 @@
         "link_another": "Seo teine seade",
         "use_sso": "Kasuta hoopis ühekordset sisselogimist",
         "error_insecure_server": "Mobiilirakendus ühendub meiliserveritega ainult üle https-i ja see server kasutab http-d."
+      },
+      "sections": {
+        "devices": "Muud rakendused ja seadmed",
+        "devices_description": "Kasuta oma posti väljaspool seda brauserit.",
+        "encryption": "Krüpteerimine"
       }
     },
     "identities": {
-      "title": "Saatja identiteedid",
       "description": "Halda e-posti aadresse, millelt saad kirju saata",
       "identities_count": {
         "label": "Sinu identiteedid",
@@ -2035,6 +2043,11 @@
       "new_folder_name": "Kausta nimi",
       "rename": "Nimeta ümber",
       "change_icon": "Muuda ikooni",
+      "count_mode": "Kausta {name} loendur",
+      "count_mode_default": "Loendur: vaikimisi",
+      "count_mode_unread": "Ainult lugemata",
+      "count_mode_all": "Lugemata ja kokku",
+      "count_mode_none": "Loendurit pole",
       "delete": "Kustuta",
       "confirm_delete": "Kas oled kindel, et soovid kustutada kausta \"{name}\"? Selles kaustas olevad kirjad liigutatakse prügikasti.",
       "create": "Loo",
@@ -2053,8 +2066,6 @@
       "error_role": "Kausta rolli uuendamine ebaõnnestus"
     },
     "advanced": {
-      "title": "Täpsemalt",
-      "description": "Täpsemad valikud ja arendaja seaded",
       "debug_mode": {
         "label": "Silumisrežiim",
         "description": "Luba tõrkeotsinguks üksikasjalik logimine"
@@ -2084,7 +2095,11 @@
       },
       "sender_favicons": {
         "label": "Saatja favicon'id",
-        "description": "Näita äriliste saatjate profiilipiltidena veebisaitide ikoone"
+        "description": "Näita äriliste saatjate profiilipiltidena veebisaitide ikoone",
+        "refresh_label": "Värskenda saatjate ikoone",
+        "refresh_description": "Laadi veebisaitide ikoonid uuesti, näiteks kui saatja on oma ikooni muutnud",
+        "refresh_button": "Värskenda",
+        "refresh_done": "Saatjate ikoonid laaditakse uuesti"
       },
       "show_avatars_in_junk": {
         "label": "Näita avatare rämpsposti kaustas",
@@ -2144,6 +2159,12 @@
           "delivered": "Kohale jõudnud",
           "mistakes": "Vead"
         }
+      },
+      "sections": {
+        "backup": "Seadete varundus",
+        "backup_description": "Säilita oma seaded brauserite ja seadmete vahel.",
+        "fix": "Probleemide lahendamine",
+        "fix_description": "Kui vaade tundub aegunud või vale või soovid otsast alustada."
       }
     },
     "sidebar_apps": {
@@ -2473,6 +2494,41 @@
       "preview": {
         "label": "Eelvaade"
       }
+    },
+    "advanced_switch": {
+      "label": "Kuva täpsemad seaded",
+      "show": "Kuva täpsemad seaded",
+      "badge": "Täpsem",
+      "hidden_count": "{count, plural, one {Sellel lehel on peidetud 1 täpsem seade.} other {Sellel lehel on peidetud # täpsemat seadet.}}"
+    },
+    "message_list": {
+      "title": "Kirjade loend",
+      "description": "Mida loend näitab ning mida klõps või pühkimine teeb.",
+      "sections": {
+        "senders": "Saatjate pildid",
+        "actions": "Kiirtoimingud",
+        "delete": "Kustutamine ja arhiveerimine",
+        "loading": "Laadimine ja otsing"
+      }
+    },
+    "reading_page": {
+      "title": "Lugemine",
+      "description": "Avatud kiri.",
+      "sections": {
+        "display": "Kirja kuvamine",
+        "images": "Pildid ja väline sisu",
+        "images_description": "Kaugpildid võivad saatjale reeta, et avasid kirja.",
+        "attachments": "Manused"
+      }
+    },
+    "composing_page": {
+      "title": "Kirjutamine",
+      "description": "Kirjutamine, vastamine ja saatmine.",
+      "sections": {
+        "replying": "Vastamine",
+        "sending": "Enne saatmist",
+        "receipts": "Lugemiskinnitused"
+      }
     }
   },
   "errors": {
@@ -2504,6 +2560,7 @@
     "unpin": "Eemalda kinnitus",
     "move_to": "Liiguta kausta...",
     "copy_to_account": "Kopeeri kontole...",
+    "remove_from_folder": "Eemalda sellest kaustast",
     "archive": "Arhiveeri",
     "delete": "Kustuta",
     "mark_as_spam": "Märgi rämpspostiks",
@@ -2601,7 +2658,9 @@
       "previous_email": "Eelmine e-kiri",
       "open_email": "Ava e-kiri",
       "close_email": "Sulge / tühista valik",
-      "go_to_folder": "Mine kausta"
+      "go_to_folder": "Mine kausta",
+      "next_unread": "Järgmine lugemata e-kiri",
+      "no_more_unread": "Allpool loendis pole rohkem lugemata e-kirju"
     },
     "actions": {
       "reply": "Vasta",
@@ -2620,7 +2679,8 @@
       "help": "Näita kiirklahve",
       "refresh": "Värskenda e-kirjad",
       "select_all": "Vali kõik",
-      "global_search": "Otsi kõike"
+      "global_search": "Otsi kõike",
+      "extend_selection": "Laienda valikut alla / üles"
     },
     "threads": {
       "expand_collapse": "Ava/sulge vestlus",
@@ -2734,11 +2794,57 @@
       "recipient_name": "Saaja nimi",
       "company": "Ettevõtte nimi",
       "date": "Tänane kuupäev",
+      "short_date": "Kuupäev numbritena",
+      "day": "Päev (kahekohaline)",
+      "month": "Kuu (kahekohaline)",
+      "year": "Aasta",
       "day_of_week": "Nädalapäev",
       "sender_name": "Sinu nimi"
     }
   },
   "contacts": {
+    "directory": {
+      "title": "Kataloog",
+      "search_placeholder": "Otsi nime või e-posti aadressi",
+      "refresh": "Värskenda kataloogi",
+      "retry": "Proovi uuesti",
+      "loading": "Kataloogi laaditakse…",
+      "unavailable_title": "Kataloog puudub",
+      "unavailable_hint": "Sinu meiliserver ei paku kontode kataloogi.",
+      "forbidden_title": "Kataloog pole saadaval",
+      "forbidden_hint": "Sinu meiliserver ei luba selle kontoga kataloogi sirvida. Küsi oma administraatorilt.",
+      "error_title": "Kataloogi laadimine ebaõnnestus",
+      "error_hint": "Kontrolli ühendust ja proovi uuesti.",
+      "empty_title": "Kataloog on tühi",
+      "empty_hint": "Sinu meiliserver ei näita ühtegi e-posti aadressiga kontot.",
+      "no_match": "Kataloogis pole kedagi, kes sinu otsingule vastaks",
+      "refresh_failed": "Kataloogi värskendamine ebaõnnestus. Näidatakse viimati laaditud nimekirja.",
+      "select_page": "Vali kõik sellel lehel",
+      "deselect_page": "Tühista valik sellel lehel",
+      "select_entry": "Vali {name}",
+      "range": "{from}–{to} / {total}",
+      "page": "Leht {page} / {count}",
+      "previous_page": "Eelmine leht",
+      "next_page": "Järgmine leht",
+      "picker_title": "Vali kataloogist",
+      "cancel": "Tühista",
+      "selected_count": "{count} valitud",
+      "add_to": "Lisa saajaks",
+      "add_cc": "Lisa CC-sse",
+      "add_bcc": "Lisa BCC-sse",
+      "select_hint": "Vali keegi, et näha tema andmeid",
+      "write_email": "Kirjuta kiri",
+      "add_to_contacts": "Lisa kontaktidesse",
+      "email": "E-post",
+      "read_only_note": "Kataloogi kirjed tulevad sinu meiliserverist ja neid ei saa siin muuta.",
+      "type": {
+        "individual": "Isik",
+        "group": "Grupp",
+        "resource": "Ressurss",
+        "location": "Asukoht",
+        "other": "Muu"
+      }
+    },
     "title": "Kontaktid",
     "search_placeholder": "Otsi kontakte...",
     "create_new": "Uus kontakt",
@@ -3941,7 +4047,8 @@
     "demo_banner_title": "Demorežiimi juhtnupud",
     "demo_banner_desc": "Oled demorežiimis - kõik jääb sinu brauserisse. Vajuta igal ajal 'Lähtesta demo', et alustada puhta näidisandmestikuga otsast peale.",
     "quota_title": "Mahu kasutus",
-    "quota_desc": "Jälgi siin oma postkasti suurust. Ring täitub, mida rohkem ruumi kasutad."
+    "quota_desc": "Jälgi siin oma postkasti suurust. Ring täitub, mida rohkem ruumi kasutad.",
+    "settings_section": "Alustamine"
   },
   "unified_mailbox": {
     "search_unavailable": "Otsing pole ühendatud vaates saadaval"
@@ -4369,8 +4476,7 @@
     "loading": "Lehe laadimine",
     "not_available_title": "See leht pole saadaval",
     "not_available_description": "Pistikprogramm, mis selle lisas, on välja lülitatud või enam paigaldamata.",
-    "back_to_mail": "Tagasi meili juurde",
-    "settings_group": "Pistikprogrammid"
+    "back_to_mail": "Tagasi meili juurde"
   },
   "command_palette": {
     "title": "Käsupalett",

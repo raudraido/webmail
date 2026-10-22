@@ -47,6 +47,23 @@ describe('host bridge origin pin for untrusted sandboxes', () => {
 
     expect(dispatchApiCall).not.toHaveBeenCalled();
   });
+
+  it('tears the frame down once it loads a second document', async () => {
+    // The host posts hook payloads with targetOrigin '*'; after the sandbox
+    // navigates itself, whatever page it shows must not keep receiving them.
+    const inst = createBackgroundInstance({ plugin: plugin(), code: '', locale: 'en', tier: 'untrusted' });
+    instances.push(inst);
+    const frame = inst.iframe;
+    frame.dispatchEvent(new Event('load')); // the sandbox document
+    expect(frame.isConnected).toBe(true);
+
+    frame.dispatchEvent(new Event('load')); // some other page
+    expect(frame.isConnected).toBe(false);
+    await expect(inst.initPromise).rejects.toThrow(/navigated away/);
+    post(frame.contentWindow, 'null', { type: 'api-request', id: '1', method: 'storage.keys', args: [] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(dispatchApiCall).not.toHaveBeenCalled();
+  });
 });
 
 describe('init payload settings', () => {
@@ -146,6 +163,29 @@ describe('host bookkeeping', () => {
     for (let i = 0; i < 50; i++) inst.updateProps({ onAttach: () => i });
 
     expect(table.size).toBe(1);
+  });
+
+  it('boots a slot with the props updated before init, whose callbacks still answer', async () => {
+    // The update used to drop the callbacks init was still going to carry,
+    // so the slot's first call got "unknown callback" (#1266).
+    const inst = createSlotInstance({
+      plugin: plugin(), slot: 'calendar-event-actions', code: '', locale: 'en', tier: 'untrusted',
+      extraProps: { setVirtualLocation: () => 'old' }, hostContainer: document.body, onResize: () => {},
+    });
+    instances.push(inst);
+    const sent = vi.spyOn(inst.iframe.contentWindow!, 'postMessage');
+    inst.updateProps({ setVirtualLocation: () => 'new' });
+
+    post(inst.iframe.contentWindow, 'null', { type: 'sandbox-ready' });
+    await new Promise((r) => setTimeout(r, 0));
+    type Msg = { type: string; payload?: { extraProps: { setVirtualLocation: { __pluginCallback: string } } } };
+    const messages = () => sent.mock.calls.map(([m]) => m as Msg);
+    const callbackId = messages().find((m) => m.type === 'init')!.payload!.extraProps.setVirtualLocation.__pluginCallback;
+    post(inst.iframe.contentWindow, 'null', { type: 'callback-invoke', id: 'c1', callbackId, args: [] });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(messages().find((m) => m.type === 'callback-response')).toEqual({ type: 'callback-response', id: 'c1', ok: true, result: 'new' });
+    expect(messages().map((m) => m.type)).not.toContain('props-update');
   });
 });
 

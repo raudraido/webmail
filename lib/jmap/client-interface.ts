@@ -4,6 +4,7 @@ import type { FileNameRules } from "@/lib/file-name-rules";
 import type { SortLevel } from "@/lib/message-list-order";
 import type { SearchSnippetResult } from "@/lib/search-snippet";
 import type { StorageQuota } from "@/lib/quota";
+import type { MessagePriority } from "@/lib/message-priority";
 
 /** What `migrateKeyword` managed to do. */
 export interface KeywordMigration {
@@ -87,7 +88,11 @@ export interface IJMAPClient {
 
   // ── Capabilities ──────────────────────────────────────────────
   getCapabilities(): Record<string, unknown>;
+  /** Account-scoped session capability data; primary account by default. */
+  getAccountCapability?(capability: string, accountId?: string): unknown;
   hasAccountCapability(capability: string, accountId?: string): boolean;
+  /** The value of an account capability (primary account by default). */
+  getAccountCapability?(capability: string, accountId?: string): unknown;
   /** FileNode naming rules the server publishes (Stalwart 0.16.6+), if any. */
   getFileNameRules?(accountId?: string): FileNameRules | null;
   getMaxSizeUpload(): number;
@@ -102,6 +107,8 @@ export interface IJMAPClient {
   supportsEmailSubmission(): boolean;
   supportsQuota(): boolean;
   supportsVacationResponse(): boolean;
+  /** Whether the user may use a capability's methods with an account (its accountCapabilities). */
+  accountSupports(accountId: string, capability: string): boolean;
   supportsContacts(): boolean;
   supportsCalendars(): boolean;
   supportsSieve(): boolean;
@@ -309,6 +316,12 @@ export interface IJMAPClient {
     accountId?: string,
   ): Promise<void>;
   moveEmail(emailId: string, toMailboxId: string, accountId?: string): Promise<void>;
+  /**
+   * Take messages out of one mailbox and leave every other mailbox they are
+   * in alone (a `mailboxIds/<id>: null` patch). A message must stay in at
+   * least one mailbox, so the server refuses this for a message only in it.
+   */
+  removeEmailsFromMailbox(emailIds: string[], mailboxId: string, accountId?: string): Promise<void>;
   emptyMailbox(mailboxId: string, accountId?: string): Promise<number>;
   moveMailboxContents(fromMailboxId: string, toMailboxId: string, accountId?: string, markAsRead?: boolean): Promise<number>;
   markMailboxAsRead(mailboxId: string, accountId?: string): Promise<number>;
@@ -336,6 +349,8 @@ export interface IJMAPClient {
     htmlBody?: string,
     inReplyTo?: string[],
     references?: string[],
+    // Importance / X-Priority headers, so a re-opened draft keeps its priority (#970).
+    options?: { priority?: MessagePriority },
   ): Promise<string>;
 
   sendEmail(
@@ -360,7 +375,7 @@ export interface IJMAPClient {
     // requestDsn / requireTls map to RFC 3461 / RFC 8689 envelope parameters
     // and need the matching `submissionExtensions` entry (see
     // supportsSubmissionExtension).
-    options?: { requestReadReceipt?: boolean; requestDsn?: boolean; requireTls?: boolean },
+    options?: { requestReadReceipt?: boolean; requestDsn?: boolean; requireTls?: boolean; priority?: MessagePriority },
   ): Promise<SendEmailResult>;
   /** Whether the submission account advertises an SMTP extension ("DSN", "REQUIRETLS", …). */
   supportsSubmissionExtension?(extension: string, accountId?: string): boolean;
@@ -507,7 +522,8 @@ export interface IJMAPClient {
 
   // ── Sharing (RFC 9670 Principals) ─────────────────────────────
   supportsPrincipals(): boolean;
-  getPrincipals(targetAccountId?: string): Promise<Principal[]>;
+  /** Errors are logged and yield [] unless `throwOnError` (PrincipalsRequestError). */
+  getPrincipals(targetAccountId?: string, options?: { throwOnError?: boolean }): Promise<Principal[]>;
   setCalendarShare(calendarId: string, principalId: string, rights: CalendarRights | null, targetAccountId?: string): Promise<void>;
   setAddressBookShare(addressBookId: string, principalId: string, rights: AddressBookRights | null, targetAccountId?: string): Promise<void>;
   setFileNodeShare(fileNodeId: string, principalId: string, rights: FileNodeRights | null, targetAccountId?: string): Promise<void>;

@@ -1,7 +1,8 @@
 "use client";
 
 import { Email, ThreadGroup } from "@/lib/jmap/types";
-import { MemoizedThreadListItem } from "./thread-list-item";
+import { MemoizedThreadListItem, listMailboxRole } from "./thread-list-item";
+import { ListColumnsHeader } from "./list-columns";
 import { useStableHandlers } from "@/hooks/use-stable-handlers";
 import type { Attachment } from "@/lib/jmap/types";
 import type { LoadListAttachments } from "@/lib/list-attachments";
@@ -10,16 +11,17 @@ import { listVerificationCode } from "@/lib/verification-code";
 import { EmailContextMenu, type CopyTargetAccount } from "./email-context-menu";
 import { BatchTagButton } from "./batch-tag-button";
 import { cn, cleanPreview } from "@/lib/utils";
-import { Trash2, Mail, MailX, MailOpen, Loader2, SearchX, AlertTriangle, CalendarClock, ShieldCheck, X } from "@/components/icons";
+import { Trash2, Mail, MailX, MailOpen, Loader2, SearchX, AlertTriangle, CalendarClock, ShieldCheck, X, FolderX } from "@/components/icons";
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { useEmailStore, ArchiveMailboxNotFoundError, resolveSelectedEmails, bulkDeleteIsPermanent, shouldConfirmBulkDelete, type ListRow } from "@/stores/email-store";
+import { useEmailStore, ArchiveMailboxNotFoundError, resolveSelectedEmails, bulkDeleteIsPermanent, shouldConfirmBulkDelete, removalFolder, canRemoveFromFolder, type ListRow } from "@/stores/email-store";
+import { useRemoveFromFolder } from "@/hooks/use-remove-from-folder";
 import { useShallow } from "zustand/react/shallow";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAccountStore } from "@/stores/account-store";
 import { useSettingsStore } from "@/stores/settings-store";
-import { useEffectiveMailLayout } from "@/hooks/use-effective-mail-layout";
+import { useListRowShape } from "@/hooks/use-list-row-shape";
 import { useUIStore } from "@/stores/ui-store";
 import { useMessageListTabsStore } from "@/stores/message-list-tabs-store";
 import { emailKeyFor, groupEmailsByThread, sortThreadGroups, threadKeyFor, getEmailTagIds } from "@/lib/thread-utils";
@@ -62,8 +64,9 @@ interface EmailListProps {
   onTogglePinned?: (email: Email) => void;
   onDelete?: (email: Email) => void;
   onArchive?: (email: Email) => void;
-  onSetTag?: (emailId: string, tagId: string | null) => void;
-  onMoveToMailbox?: (emailId: string, mailboxId: string) => void;
+  /** `emailKey` (emailKeyFor of the row) tells namesakes in other accounts apart. */
+  onSetTag?: (emailId: string, tagId: string | null, emailKey?: string) => void;
+  onMoveToMailbox?: (emailId: string, mailboxId: string, emailKey?: string) => void;
   onMarkAsSpam?: (email: Email) => void;
   onUndoSpam?: (email: Email) => void;
   onOpenAttachment?: (email: Email, attachment: Attachment) => void;
@@ -171,7 +174,7 @@ export function EmailList({
     isLoadingThread,
     toggleThreadExpansion,
     fetchThreadEmails,
-    markThreadAsRead,
+    autoMarkExpandedThreadAsRead,
     collapseAllThreads,
     threadEmailCounts,
     searchFilters,
@@ -203,7 +206,7 @@ export function EmailList({
     isLoadingThread: state.isLoadingThread,
     toggleThreadExpansion: state.toggleThreadExpansion,
     fetchThreadEmails: state.fetchThreadEmails,
-    markThreadAsRead: state.markThreadAsRead,
+    autoMarkExpandedThreadAsRead: state.autoMarkExpandedThreadAsRead,
     collapseAllThreads: state.collapseAllThreads,
     threadEmailCounts: state.threadEmailCounts,
     searchFilters: state.searchFilters,
@@ -250,8 +253,11 @@ export function EmailList({
    * the message it was handed when it opened, but tags can be applied from
    * inside it without dismissing it, so what it draws has to keep up.
    */
+  // The live copy of the row the menu was opened on, by its key: in a merged
+  // view the bare id is also another account's message, and every action of
+  // the menu would go to that namesake instead.
   const contextMenuEmail = contextMenu.data
-    ? emails.find((email) => email.id === contextMenu.data!.id) ?? contextMenu.data
+    ? emails.find((email) => emailKeyFor(email) === emailKeyFor(contextMenu.data!)) ?? contextMenu.data
     : null;
   /**
    * Whose sender the menu's Rules entry uses: every selected message, or the
@@ -353,7 +359,11 @@ export function EmailList({
   const density = useSettingsStore((state) => state.density);
   const showPreview = useSettingsStore((state) => state.showPreview);
   const showVerificationCodes = useSettingsStore((state) => state.showVerificationCodes);
-  const mailLayout = useEffectiveMailLayout();
+  const { oneLine: isFocusedMailLayout, columns: listColumns } = useListRowShape();
+  const showRecipientColumn = useEmailStore((state) => {
+    const role = listMailboxRole(state);
+    return role === 'sent' || role === 'drafts';
+  });
   const footerHasMore = hasMore ?? hasMoreEmails;
   const footerIsLoadingMore = isLoadingMoreItems ?? isLoadingMore;
   const isMobile = useUIStore((state) => state.isMobile);
@@ -375,8 +385,7 @@ export function EmailList({
   }, [threadGroups, expandedThreadIds, threadEmailsCache, isMobile, setListRows]);
   useEffect(() => () => setListRows(null), [setListRows]);
 
-  // Match the list items: focus layout collapses to multi-line on mobile, so virtualizer estimates must match.
-  const isFocusedMailLayout = mailLayout === 'focus' && !isMobile;
+  // The virtualizer's guesses follow the rows' shape (see useListRowShape).
 
   const estimateSize = useCallback((index: number) => {
     if (isFocusedMailLayout) {
@@ -451,6 +460,25 @@ export function EmailList({
     [emails, threadEmailsCache, selectedEmailKeys],
   );
   const bulkActionContext = useMemo(() => ({ emailIds: selectedEmailIds }), [selectedEmailIds]);
+  // "Remove from this folder" (#615): offered for a selection only when every
+  // selected message is also in another folder.
+  const removeFromFolder = useRemoveFromFolder();
+  const folderToLeave = useEmailStore(removalFolder);
+  const selectedEmailsForRemoval = useMemo(
+    () => (hasSelection ? resolveSelectedEmails({ emails, threadEmailsCache, selectedEmailKeys }) : []),
+    [hasSelection, emails, threadEmailsCache, selectedEmailKeys],
+  );
+  const selectionCanLeaveFolder = selectedEmailsForRemoval.length > 0
+    && selectedEmailsForRemoval.every((email) => canRemoveFromFolder(email, folderToLeave));
+  const handleBatchRemoveFromFolder = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
+    try {
+      await removeFromFolder(resolveSelectedEmails(useEmailStore.getState()));
+    } finally {
+      setTimeout(() => setIsProcessing(false), 500);
+    }
+  };
   const listSlotProps = useMemo(
     () => ({ mailboxId: selectedMailbox || null, mailboxRole: effectiveMailboxRole ?? null }),
     [selectedMailbox, effectiveMailboxRole],
@@ -587,13 +615,13 @@ export function EmailList({
       toggleThreadExpansion(threadKey);
       await fetchThreadEmails(client, threadKey);
       emitThreadExpand(threadKey, threadMembers(threadKey), true);
-      // Mark all unread emails in this thread as read
-      void markThreadAsRead(client, threadKey);
+      // Mark the thread's unread emails read, following markAsReadDelay.
+      autoMarkExpandedThreadAsRead(client, threadKey);
     } else {
       toggleThreadExpansion(threadKey);
       emitThreadExpand(threadKey, threadMembers(threadKey), !isExpanded);
     }
-  }, [client, expandedThreadIds, toggleThreadExpansion, fetchThreadEmails, markThreadAsRead, threadMembers]);
+  }, [client, expandedThreadIds, toggleThreadExpansion, fetchThreadEmails, autoMarkExpandedThreadAsRead, threadMembers]);
 
   const collapseAllThreadsAndNotify = useCallback(() => {
     const wereExpanded = [...useEmailStore.getState().expandedThreadIds];
@@ -683,6 +711,15 @@ export function EmailList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEmailId]);
 
+  // Keep the moving end of a Shift+Arrow range on screen (#992).
+  const selectionFocusKey = useEmailStore((state) => state.selectionFocus?.focus ?? null);
+  useEffect(() => {
+    if (!selectionFocusKey) return;
+    const index = threadGroups.findIndex((thread) => thread.emails.some((e) => emailKeyFor(e) === selectionFocusKey));
+    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionFocusKey]);
+
   // Re-measure all items when density or preview settings change
   useEffect(() => {
     virtualizer.measure();
@@ -757,6 +794,24 @@ export function EmailList({
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <ShieldCheck className="w-4 h-4" />
+                )}
+              </Button>
+            )}
+            {selectionCanLeaveFolder && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleBatchRemoveFromFolder}
+                title={tContextMenu('remove_from_folder')}
+                aria-label={tContextMenu('remove_from_folder')}
+                disabled={isProcessing}
+                data-testid="batch-remove-from-folder"
+                className="hover:bg-accent transition-colors disabled:opacity-50"
+              >
+                {isProcessing ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <FolderX className="w-4 h-4" />
                 )}
               </Button>
             )}
@@ -842,8 +897,18 @@ export function EmailList({
 
       <PluginSlot name="message-list-header" className="w-full" extraProps={listSlotProps} />
 
+      {listColumns && (
+        <ListColumnsHeader density={density} selecting={hasSelection} showRecipient={showRecipientColumn} />
+      )}
+
       {/* Email List */}
-      <div ref={parentRef} className="flex-1 overflow-y-auto bg-background relative" data-tour="email-list">
+      <div
+        ref={parentRef}
+        className="flex-1 overflow-y-auto bg-background relative"
+        data-tour="email-list"
+        // The column header above keeps the same gutter, so its titles stay over the columns.
+        style={listColumns ? { scrollbarGutter: 'stable' } : undefined}
+      >
         {/* Loading overlay */}
         {isLoading && emails.length > 0 && (
           <div className="absolute inset-0 bg-background/50 z-10 flex items-center justify-center animate-in fade-in duration-150">
@@ -973,8 +1038,9 @@ export function EmailList({
           onTogglePinned={onTogglePinned ? () => onTogglePinned(contextMenuEmail!) : undefined}
           onDelete={() => onDelete?.(contextMenuEmail!)}
           onArchive={() => onArchive?.(contextMenuEmail!)}
-          onSetTag={(color) => onSetTag?.(contextMenuEmail!.id, color)}
-          onMoveToMailbox={(mailboxId) => onMoveToMailbox?.(contextMenuEmail!.id, mailboxId)}
+          onSetTag={(color) => onSetTag?.(contextMenuEmail!.id, color, emailKeyFor(contextMenuEmail!))}
+          onMoveToMailbox={(mailboxId) => onMoveToMailbox?.(contextMenuEmail!.id, mailboxId, emailKeyFor(contextMenuEmail!))}
+          onRemoveFromFolder={() => void removeFromFolder([contextMenuEmail!])}
           onMarkAsSpam={() => onMarkAsSpam?.(contextMenuEmail!)}
           onUndoSpam={() => onUndoSpam?.(contextMenuEmail!)}
           onEditDraft={() => onEditDraft?.(contextMenuEmail!)}
@@ -1016,6 +1082,8 @@ export function EmailList({
                 : undefined,
             });
           }}
+          batchEmails={selectedEmailsForRemoval}
+          onBatchRemoveFromFolder={() => void handleBatchRemoveFromFolder()}
           onBatchMoveToMailbox={async (mailboxId) => {
             if (!client) return;
             const count = selectedEmailKeys.size;

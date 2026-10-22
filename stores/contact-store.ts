@@ -9,6 +9,9 @@ import { getClientByLocalAccountId } from './client-registry';
 import { sanitizeDisplayName, splitMailbox } from '@/lib/rfc5322-mailbox';
 import { contactHooks } from '@/lib/plugin-hooks';
 import { contactToView } from '@/lib/plugin-projection';
+import { PrincipalsRequestError } from '@/lib/jmap/principals-error';
+import type { Principal } from '@/lib/jmap/types';
+import { currentStoreEpoch } from '@/lib/store-epoch';
 
 /** A contact that is about to be created, projected for plugins (no id yet). */
 function draftContactView(contact: Partial<ContactCard>) {
@@ -348,9 +351,11 @@ interface ContactStore {
   activeTab: 'all' | 'groups';
 
   // Directory (RFC 9670 principals) — other users/groups on the server, used to
-  // augment recipient autocomplete. Runtime only, not persisted.
-  directoryPrincipals: Array<{ name: string; email: string; description?: string }>;
+  // augment recipient autocomplete and for the browsable company directory.
+  // Runtime only, not persisted.
+  directoryPrincipals: DirectoryEntry[];
   directoryLoaded: boolean;
+  directoryStatus: DirectoryStatus;
 
   fetchContacts: (client: IJMAPClient) => Promise<void>;
   fetchDirectory: (client: IJMAPClient) => Promise<void>;
@@ -413,6 +418,43 @@ interface ContactStore {
   searchRecipients: (client: IJMAPClient, query: string) => Promise<Array<{ name: string; email: string }>>;
 }
 
+/** One entry of the company directory: a principal that has an address. */
+export interface DirectoryEntry {
+  id?: string;
+  /** Display name: the principal's description, else its name, else the address. */
+  name: string;
+  email: string;
+  description?: string;
+  type?: Principal['type'];
+}
+
+/**
+ * Where the directory fetch stands. `unavailable`: the server has no
+ * principals capability. `forbidden`: the server refused this account's
+ * directory query. `error`: the request failed.
+ */
+export type DirectoryStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'forbidden' | 'error';
+
+export function principalsToDirectory(principals: Principal[]): DirectoryEntry[] {
+  const entries: DirectoryEntry[] = [];
+  const seen = new Set<string>();
+  for (const p of principals) {
+    // Stalwart reports a principal's account name in `email`; only those
+    // with an address are usable as recipients.
+    const email = p.email?.trim();
+    if (!email || seen.has(email.toLowerCase())) continue;
+    seen.add(email.toLowerCase());
+    entries.push({
+      id: p.id,
+      name: p.description || p.name || email,
+      email,
+      description: p.description ?? undefined,
+      type: p.type,
+    });
+  }
+  return entries;
+}
+
 /** The Sent-folder read loadRecentRecipients has in flight, if any. */
 let recentRecipientsLoading: Promise<void> | null = null;
 
@@ -471,51 +513,61 @@ export const useContactStore = create<ContactStore>()(
       activeTab: 'all' as const,
       directoryPrincipals: [],
       directoryLoaded: false,
+      directoryStatus: 'idle' as DirectoryStatus,
 
+      // Every fetch below captures the store epoch before awaiting the server
+      // and drops its result once the stores were cleared for another account
+      // (lib/store-epoch.ts): a slow answer for account A must not become
+      // account B's address book, autocomplete and contact list.
       fetchContacts: async (client) => {
+        const epoch = currentStoreEpoch();
         set({ isLoading: true, error: null });
         try {
           const contacts = await client.getAllContacts();
+          if (currentStoreEpoch() !== epoch) return;
           set({ contacts, isLoading: false, contactsLoaded: true });
         } catch (error) {
+          if (currentStoreEpoch() !== epoch) return;
           console.error('Failed to fetch contacts:', error);
           set({ error: 'Failed to fetch contacts', isLoading: false, contactsLoaded: true });
         }
       },
 
       fetchDirectory: async (client) => {
-        if (!client.supportsPrincipals()) return;
+        if (!client.supportsPrincipals()) {
+          set({ directoryStatus: 'unavailable' });
+          return;
+        }
+        const epoch = currentStoreEpoch();
+        set({ directoryStatus: 'loading' });
         try {
-          const principals = await client.getPrincipals();
-          const entries: Array<{ name: string; email: string; description?: string }> = [];
-          for (const p of principals) {
-            // Stalwart reports a principal's account name in `email`; only those
-            // with an address are usable as recipients.
-            const email = p.email?.trim();
-            if (!email) continue;
-            entries.push({
-              name: p.description || p.name || email,
-              email,
-              description: p.description ?? undefined,
-            });
-          }
-          set({ directoryPrincipals: entries, directoryLoaded: true });
+          const principals = await client.getPrincipals(undefined, { throwOnError: true });
+          if (currentStoreEpoch() !== epoch) return;
+          set({ directoryPrincipals: principalsToDirectory(principals), directoryLoaded: true, directoryStatus: 'ready' });
         } catch (error) {
+          if (currentStoreEpoch() !== epoch) return;
           debug.error('Failed to fetch directory principals:', error);
+          // Keep what an earlier fetch returned: autocomplete still works off it.
+          const forbidden = error instanceof PrincipalsRequestError && error.type === 'forbidden';
+          set({ directoryStatus: forbidden ? 'forbidden' : 'error' });
         }
       },
 
       fetchAddressBooks: async (client) => {
+        const epoch = currentStoreEpoch();
         try {
           const addressBooks = await client.getAllAddressBooks();
+          if (currentStoreEpoch() !== epoch) return;
           set({ addressBooks });
         } catch (error) {
+          if (currentStoreEpoch() !== epoch) return;
           console.error('Failed to fetch address books:', error);
           set({ error: 'Failed to fetch address books' });
         }
       },
 
       fetchAllAccountsContacts: async (accounts) => {
+        const epoch = currentStoreEpoch();
         set({ isLoading: true, error: null });
         try {
           const results = await Promise.all(
@@ -529,14 +581,17 @@ export const useContactStore = create<ContactStore>()(
               }
             }),
           );
+          if (currentStoreEpoch() !== epoch) return;
           set({ contacts: results.flat(), isLoading: false, contactsLoaded: true });
         } catch (error) {
+          if (currentStoreEpoch() !== epoch) return;
           console.error('Failed to fetch all-account contacts:', error);
           set({ error: 'Failed to fetch contacts', isLoading: false, contactsLoaded: true });
         }
       },
 
       fetchAllAccountsAddressBooks: async (accounts) => {
+        const epoch = currentStoreEpoch();
         try {
           const results = await Promise.all(
             accounts.map(async ({ client, localAccountId }) => {
@@ -549,8 +604,10 @@ export const useContactStore = create<ContactStore>()(
               }
             }),
           );
+          if (currentStoreEpoch() !== epoch) return;
           set({ addressBooks: results.flat() });
         } catch (error) {
+          if (currentStoreEpoch() !== epoch) return;
           console.error('Failed to fetch all-account address books:', error);
           set({ error: 'Failed to fetch address books' });
         }
@@ -711,6 +768,7 @@ export const useContactStore = create<ContactStore>()(
         activeTab: 'all',
         directoryPrincipals: [],
         directoryLoaded: false,
+        directoryStatus: 'idle',
       }),
 
       getAutocomplete: (query) => {

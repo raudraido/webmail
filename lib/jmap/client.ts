@@ -1,10 +1,11 @@
+import { ArchiveEmailsError } from "./archive-error";
 import { generateUUID } from '@/lib/utils';
 import type { Attachment, Email, Mailbox, MailboxRights, StateChange, AccountStates, CollectionChanges, ShareNotification, BusyPeriod, CalendarParticipantIdentity, CalendarEventNotification, Thread, Identity, EmailAddress, ContactCard, AddressBook, AddressBookRights, VacationResponse, Calendar, CalendarComponentType, CalendarRights, CalendarEvent, CalendarEventFilter, CalendarTask, CreateCalendarOptions, FileNode, FileNodeFilter, FileNodeRights, Principal, PushSubscription, EmailPushConfig, DeliveryStatus, EmailSubmission, RejectedRecipient, ScheduledEmail, SendEmailResult, SharedAccount } from "./types";
 import type { SieveScript, SieveCapabilities } from "./sieve-types";
 import type { CalendarEventUpdateOptions, IJMAPClient, KeywordDiscoveryResult, KeywordInfo, KeywordMigration, SearchEmailsResult, SearchRequestOptions } from "./client-interface";
 import { attachSearchSnippets, filterHasSnippetTerms, snippetFilterFor, type SearchSnippetResult } from "@/lib/search-snippet";
 import { batched, itemsPerRequest } from "./request-limits";
-import { keywordPointer } from "./patch-pointer";
+import { keywordPointer, pointerToken } from "./patch-pointer";
 import { FirstTouchGate } from "./first-touch-gate";
 import { debug } from "@/lib/debug";
 import { normalizeCalendarEventLike } from "@/lib/calendar-event-normalization";
@@ -15,13 +16,16 @@ import { sanitizeDisplayName, splitMailbox } from "@/lib/rfc5322-mailbox";
 import { decodeFileNodeName } from "./filenode-name";
 import { contactFromWire, contactToWire } from "./contact-wire";
 import { SchedulingDeniedError } from "./scheduling-error";
+import { PrincipalsRequestError } from "./principals-error";
+import { RescheduleRestoredError } from "./reschedule-error";
 
-export { SchedulingDeniedError };
+export { SchedulingDeniedError, RescheduleRestoredError };
 import { acceptedFileName, fileNameRulesFrom, type FileNameRules } from "@/lib/file-name-rules";
 import { getEffectiveTimeZone, toLocalDateTime } from "@/lib/timezone";
 import { buildEmailSort, compareEmails, hasKeywordLevels, type KeywordSortPolarity, type SortLevel } from "@/lib/message-list-order";
 import { toInertBlob } from "@/lib/file-preview";
 import { toStorageQuota, type JMAPQuota, type StorageQuota } from "@/lib/quota";
+import { messagePriorityHeaders, type MessagePriority } from "@/lib/message-priority";
 
 // Cap for the follow-up Email/get issued when a displayed body part comes
 // back truncated at the normal 256000-byte limit (see refetchTruncatedBodyValues
@@ -568,6 +572,20 @@ function getUserTimeZone(): string | undefined {
   }
 }
 
+const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * A task's `due` and `start` are LocalDateTimes (RFC 8984). Stalwart accepts a
+ * bare date and echoes it over JMAP, but stores no DUE in the iCalendar, so
+ * CalDAV clients lose the date. Completes a bare date to midnight.
+ */
+function completeBareTaskDates<T extends Partial<CalendarTask>>(task: T): T {
+  const result = { ...task };
+  if (typeof result.due === 'string' && BARE_DATE.test(result.due)) result.due = `${result.due}T00:00:00`;
+  if (typeof result.start === 'string' && BARE_DATE.test(result.start)) result.start = `${result.start}T00:00:00`;
+  return result;
+}
+
 /**
  * Stalwart's calcard crate uses singular property names ("recurrenceRule")
  * instead of the RFC 8984 plural forms ("recurrenceRules").
@@ -957,6 +975,8 @@ export interface SubmissionSendOptions {
   requestReadReceipt?: boolean;
   requestDsn?: boolean;
   requireTls?: boolean;
+  /** Importance / X-Priority headers (#970); see lib/message-priority.ts. */
+  priority?: MessagePriority;
 }
 
 /** The MAIL FROM / RCPT TO parameters the options translate to. */
@@ -1174,6 +1194,15 @@ export class JMAPClient implements IJMAPClient {
 
   getAuthHeader(): string {
     return this.authHeader;
+  }
+
+  /**
+   * The password of a plain Basic session, or null for a bearer session and
+   * for one that appends a TOTP code (that code expires; the password alone
+   * would not sign in).
+   */
+  getBasicPassword(): string | null {
+    return this.authHeader.startsWith('Basic ') && !this.onTotpRequired ? this.password : null;
   }
 
   getServerUrl(): string {
@@ -2790,11 +2819,56 @@ export class JMAPClient implements IJMAPClient {
     existingMailboxes: Mailbox[],
     accountId?: string,
   ): Promise<void> {
+    const updatedIds: string[] = [];
+    try {
+      await this.archiveEmails(emails, archiveMailboxId, mode, existingMailboxes, accountId, updatedIds);
+    } catch (error) {
+      throw new ArchiveEmailsError(
+        error instanceof Error ? error.message : 'Failed to archive emails',
+        updatedIds,
+        { cause: error },
+      );
+    }
+  }
+
+  private confirmArchivedEmails(
+    entry: JMAPResponse['methodResponses'][number] | undefined,
+    requestedIds: string[],
+    updatedIds: string[],
+  ): void {
+    const [name, result] = entry ?? [];
+    if (name === 'Email/set') {
+      updatedIds.push(...requestedIds.filter(id =>
+        Object.prototype.hasOwnProperty.call(result?.updated ?? {}, id) && !result?.notUpdated?.[id],
+      ));
+    }
+    this.assertEmailSetSucceeded({ methodResponses: entry ? [entry] : [] } as JMAPResponse, 'archive emails');
+    if (requestedIds.some(id => !updatedIds.includes(id))) {
+      throw new Error('Failed to archive emails: update was not confirmed');
+    }
+  }
+
+  private async archiveEmails(
+    emails: Array<{ id: string; receivedAt: string }>,
+    archiveMailboxId: string,
+    mode: 'single' | 'year' | 'month',
+    existingMailboxes: Mailbox[],
+    accountId: string | undefined,
+    updatedIds: string[],
+  ): Promise<void> {
     if (emails.length === 0) return;
     const targetAccountId = accountId || this.accountId;
 
     if (mode === 'single') {
-      await this.batchMoveEmails(emails.map(e => e.id), archiveMailboxId, targetAccountId);
+      for (const batch of batched(emails, this.getMaxObjectsInSet())) {
+        const response = await this.request([
+          ['Email/set', {
+            accountId: targetAccountId,
+            update: Object.fromEntries(batch.map(e => [e.id, { mailboxIds: { [archiveMailboxId]: true } }])),
+          }, '0'],
+        ]);
+        this.confirmArchivedEmails(response.methodResponses?.[0], batch.map(e => e.id), updatedIds);
+      }
       return;
     }
 
@@ -2884,7 +2958,18 @@ export class JMAPClient implements IJMAPClient {
 
       const response = await this.request(methodCalls);
 
+      let emailError: unknown;
+      try {
+        this.confirmArchivedEmails(response.methodResponses?.[withCreates ? 1 : 0], batch.map(([id]) => id), updatedIds);
+      } catch (error) {
+        emailError = error;
+      }
+
       if (withCreates) {
+        if (response.methodResponses?.[0]?.[0] === 'error') {
+          const error = response.methodResponses[0][1];
+          throw new Error(`Failed to create archive folders: ${error?.description || error?.type || 'unknown error'}`);
+        }
         const mailboxResult = response.methodResponses?.[0]?.[1];
         const notCreated = mailboxResult?.notCreated as Record<string, { type?: string; properties?: string[]; description?: string }> | undefined;
         const failures = notCreated ? Object.entries(notCreated) : [];
@@ -2902,15 +2987,7 @@ export class JMAPClient implements IJMAPClient {
             .map(([cid, mailbox]) => [`#${cid}`, mailbox.id!]),
         );
       }
-
-      const emailIdx = withCreates ? 1 : 0;
-      const emailResult = response.methodResponses?.[emailIdx]?.[1];
-      const notUpdated = emailResult?.notUpdated as Record<string, { type?: string; description?: string }> | undefined;
-      const emailFailures = notUpdated ? Object.entries(notUpdated) : [];
-      if (emailFailures.length > 0) {
-        const [id, err] = emailFailures[0];
-        throw new Error(`Failed to move ${emailFailures.length} email(s), first: ${id} – ${err.type || 'unknown'}${err.description ? ` (${err.description})` : ''}`);
-      }
+      if (emailError) throw emailError;
     }
   }
 
@@ -2930,6 +3007,21 @@ export class JMAPClient implements IJMAPClient {
     const result = response.methodResponses?.[0]?.[1];
     if (result?.notUpdated?.[emailId]) {
       throw new Error(`Failed to move email: ${result.notUpdated[emailId].type || 'unknown error'}`);
+    }
+  }
+
+  async removeEmailsFromMailbox(emailIds: string[], mailboxId: string, accountId?: string): Promise<void> {
+    if (emailIds.length === 0) return;
+    // A pointer patch, not a full mailboxIds replacement: the other mailboxes
+    // the message is in stay as the server has them, even when the copy the
+    // client holds is out of date.
+    const patch = { [`mailboxIds/${pointerToken(mailboxId)}`]: null };
+    for (const batch of batched(emailIds, this.getMaxObjectsInSet())) {
+      const update = Object.fromEntries(batch.map(id => [id, { ...patch }]));
+      const response = await this.request([
+        ["Email/set", { accountId: accountId || this.accountId, update }, "0"],
+      ]);
+      assertSetSucceeded(response, 'Failed to remove from folder');
     }
   }
 
@@ -3880,6 +3972,7 @@ export class JMAPClient implements IJMAPClient {
     htmlBody?: string,
     inReplyTo?: string[],
     references?: string[],
+    options?: { priority?: MessagePriority },
   ): Promise<string> {
     const mailboxes = await this.getMailboxes();
     const draftsMailbox = mailboxes.find(mb => mb.role === 'drafts');
@@ -3903,6 +3996,7 @@ export class JMAPClient implements IJMAPClient {
       attachments?: { blobId: string; type: string; name: string; disposition: string; cid?: string }[];
       inReplyTo?: string[];
       references?: string[];
+      [header: `header:${string}`]: string;
     }
 
     const sanitizedFromName = sanitizeIdentityDisplayName(fromName);
@@ -3930,6 +4024,8 @@ export class JMAPClient implements IJMAPClient {
       ...(htmlBody ? { htmlBody: [{ partId: "html", type: "text/html" }] } : {}),
       ...(draftInReplyTo?.length ? { inReplyTo: draftInReplyTo } : {}),
       ...(draftReferences?.length ? { references: draftReferences } : {}),
+      // A re-opened draft reads its priority back from these (#970).
+      ...messagePriorityHeaders(options?.priority),
     };
 
     if (attachments?.length) {
@@ -4099,6 +4195,8 @@ export class JMAPClient implements IJMAPClient {
       // via the "header:<Name>:asText" property form.
       emailCreate["header:Disposition-Notification-To:asText"] = fromEmail || this.username;
     }
+
+    Object.assign(emailCreate, messagePriorityHeaders(options?.priority));
 
     if (htmlBody) {
       // Send as multipart/alternative with both text and HTML
@@ -5267,16 +5365,15 @@ export class JMAPClient implements IJMAPClient {
     return submission?.sendAt;
   }
 
-  private async getEmailSubmissionEnvelope(submissionId: string, accountId?: string): Promise<{ rcptTo?: Array<{ email: string }> } | undefined> {
+  private async getEmailSubmissionForReschedule(submissionId: string, accountId?: string): Promise<{ envelope?: { rcptTo?: Array<{ email: string }> }; sendAt?: string } | undefined> {
     const response = await this.request([
       ['EmailSubmission/get', {
         accountId: accountId ?? await this.resolveSubmissionAccountId(submissionId),
         ids: [submissionId],
-        properties: ['envelope'],
+        properties: ['envelope', 'sendAt'],
       }, '0'],
     ]);
-    const submission = response.methodResponses?.[0]?.[1]?.list?.[0] as { envelope?: { rcptTo?: Array<{ email: string }> } } | undefined;
-    return submission?.envelope;
+    return response.methodResponses?.[0]?.[1]?.list?.[0] as { envelope?: { rcptTo?: Array<{ email: string }> }; sendAt?: string } | undefined;
   }
 
   private getSubmissionAccountId(accountId?: string): string {
@@ -5916,7 +6013,7 @@ export class JMAPClient implements IJMAPClient {
    * to the chained Principal/get, which the server refuses with
    * `requestTooLarge` once the directory holds more than that (500).
    */
-  async getPrincipals(targetAccountId?: string): Promise<Principal[]> {
+  async getPrincipals(targetAccountId?: string, options?: { throwOnError?: boolean }): Promise<Principal[]> {
     if (!this.supportsPrincipals()) return [];
     const accountId = targetAccountId || this.accountId;
     const pageSize = this.getMaxObjectsInGet();
@@ -5934,7 +6031,11 @@ export class JMAPClient implements IJMAPClient {
 
         const ids: string[] = response.methodResponses?.find((r) => r[0] === "Principal/query")?.[1]?.ids ?? [];
         const getResp = response.methodResponses?.find((r) => r[0] === "Principal/get");
-        if (!getResp) break;
+        if (!getResp) {
+          if (!options?.throwOnError) break;
+          const err = response.methodResponses?.find((r) => r[0] === "error")?.[1] as { type?: string; description?: string } | undefined;
+          throw new PrincipalsRequestError(err?.type ?? null, err?.description);
+        }
         const list = (getResp[1].list || []) as Principal[];
         all.push(...list.map((p) => ({ ...p, accountId })));
         if (ids.length < pageSize) break;
@@ -5942,6 +6043,11 @@ export class JMAPClient implements IJMAPClient {
       }
       return all;
     } catch (error) {
+      if (options?.throwOnError) {
+        throw error instanceof PrincipalsRequestError
+          ? error
+          : new PrincipalsRequestError(null, error instanceof Error ? error.message : undefined);
+      }
       console.error("Failed to fetch principals:", error);
       return [];
     }
@@ -7793,7 +7899,7 @@ export class JMAPClient implements IJMAPClient {
       accountId = resolved.accountId;
       taskData.calendarIds = resolved.calendarIds;
     }
-    const cleanTask = { ...taskData, '@type': 'Task' };
+    const cleanTask = { ...completeBareTaskDates(taskData), '@type': 'Task' };
 
     debug.group('CalendarTask/create', 'tasks');
     debug.log('tasks', 'CalendarTask/create accountId', accountId);
@@ -7876,10 +7982,10 @@ export class JMAPClient implements IJMAPClient {
    */
   async updateCalendarTask(taskId: string, updates: Partial<CalendarTask>, targetAccountId?: string): Promise<string> {
     const source = targetAccountId ? { accountId: targetAccountId, id: taskId } : this.splitCalendarObjectId(taskId);
-    let patch = updates;
-    if (!targetAccountId && updates.calendarIds) {
-      const dest = this.resolveTaskCalendarIds(updates.calendarIds);
-      patch = { ...updates, calendarIds: dest.calendarIds };
+    let patch = completeBareTaskDates(updates);
+    if (!targetAccountId && patch.calendarIds) {
+      const dest = this.resolveTaskCalendarIds(patch.calendarIds);
+      patch = { ...patch, calendarIds: dest.calendarIds };
       if (dest.accountId !== source.accountId) {
         return this.moveCalendarTaskToAccount(source, dest.accountId, patch);
       }
@@ -9741,49 +9847,86 @@ export class JMAPClient implements IJMAPClient {
     } catch (error) {
       console.error('Failed to get identity for reschedule:', error);
     }
-    const existingEnvelope = await this.getEmailSubmissionEnvelope(submissionId, submissionAccountId);
+    const original = await this.getEmailSubmissionForReschedule(submissionId, submissionAccountId);
+    const existingEnvelope = original?.envelope;
     const email = existingEnvelope?.rcptTo?.length ? undefined : await this.getEmail(emailId, submissionAccountId);
     const envelopeRecipients = existingEnvelope?.rcptTo?.length
       ? existingEnvelope.rcptTo
       : [...(email?.to || []), ...(email?.cc || []), ...(email?.bcc || [])];
-    const envelope = createDelayedSubmissionEnvelope(identity?.email || this.username, holdForSeconds, envelopeRecipients);
-    const response = await this.request([
-      ['EmailSubmission/set', {
-        accountId: submissionAccountId,
-        create: { replacement: { emailId, identityId, ...(envelope ? { envelope } : {}) } },
-        ...(draftsMailbox && sentMailbox ? {
-          onSuccessUpdateEmail: {
-            '#replacement': {
-              ...mailboxIdsReplacement(sentMailbox.id),
-              'keywords/$draft': null,
+    const fromEmail = identity?.email || this.username;
+
+    const createSubmission = async (holdFor: number | undefined): Promise<{ id: string; sendAt?: string }> => {
+      const envelope = createDelayedSubmissionEnvelope(fromEmail, holdFor, envelopeRecipients);
+      const response = await this.request([
+        ['EmailSubmission/set', {
+          accountId: submissionAccountId,
+          create: { replacement: { emailId, identityId, ...(envelope ? { envelope } : {}) } },
+          ...(draftsMailbox && sentMailbox ? {
+            onSuccessUpdateEmail: {
+              '#replacement': {
+                ...mailboxIdsReplacement(sentMailbox.id),
+                'keywords/$draft': null,
+              },
             },
-          },
-        } : {}),
-      }, '0'],
-    ]);
-    const result = response.methodResponses?.[0]?.[1];
-    const createError = result?.notCreated?.replacement;
-    if (createError) {
-      throw new Error(createError.description || createError.type || 'Failed to reschedule email');
-    }
-    const replacementId = result?.created?.replacement?.id;
-    const serverSendAt = result?.created?.replacement?.sendAt;
-    if (!replacementId) {
-      throw new Error('Server did not return a replacement scheduled send ID');
-    }
-    const finalSendAt = serverSendAt || await this.getEmailSubmissionSendAt(replacementId, submissionAccountId);
-    try {
-      await this.cancelEmailSubmission(submissionId, submissionAccountId);
-    } catch (error) {
-      try {
-        await this.cancelEmailSubmission(replacementId, submissionAccountId);
-      } catch (cleanupError) {
-        console.error('Failed to clean up replacement scheduled send after reschedule failure:', cleanupError);
+          } : {}),
+        }, '0'],
+      ]);
+      // Only the submission call counts: the implied Email/set from
+      // onSuccessUpdateEmail can fail while the submission was created.
+      const [methodName, result] = response.methodResponses?.[0] ?? [];
+      if (methodName === 'error') {
+        throw new Error(result?.description || result?.type || 'Failed to reschedule email');
       }
-      const message = error instanceof Error ? error.message : 'Failed to cancel original scheduled send';
-      throw new Error(`Reschedule created a replacement but could not cancel the original: ${message}`);
+      const createError = result?.notCreated?.replacement;
+      if (createError) {
+        throw new Error(createError.description || createError.type || 'Failed to reschedule email');
+      }
+      const id = result?.created?.replacement?.id;
+      if (!id) {
+        throw new Error('Server did not return a replacement scheduled send ID');
+      }
+      return { id, sendAt: result?.created?.replacement?.sendAt };
+    };
+
+    // Cancel first. Some servers allow only one active submission per Email
+    // and reject a second create for the same emailId, and servers that undo
+    // onSuccessUpdateEmail on cancel would pull the message back to Drafts if
+    // the original were canceled after the replacement existed (#1308).
+    // If this fails, nothing has changed and the original still goes out.
+    await this.cancelEmailSubmission(submissionId, submissionAccountId);
+
+    let replacement: { id: string; sendAt?: string };
+    try {
+      replacement = await createSubmission(holdForSeconds);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to reschedule email';
+      // Put the original back at its old time. HOLDFOR with the seconds that
+      // are left, not HOLDUNTIL: servers disagree on the HOLDUNTIL value format
+      // (RFC 3339 vs Unix seconds), every FUTURERELEASE server takes HOLDFOR.
+      const originalTime = original?.sendAt ? new Date(original.sendAt).getTime() : NaN;
+      const remainingSeconds = Number.isFinite(originalTime) ? Math.ceil((originalTime - Date.now()) / 1000) : 0;
+      let restored: { id: string; sendAt?: string } | undefined;
+      try {
+        restored = await createSubmission(remainingSeconds > 0 ? remainingSeconds : undefined);
+      } catch (restoreError) {
+        console.error('Failed to restore the original scheduled send after reschedule failure:', restoreError);
+      }
+      if (restored) {
+        throw new RescheduleRestoredError(message, restored.id, restored.sendAt || original?.sendAt);
+      }
+      // Neither went through: the message is not scheduled any more. Make sure
+      // it sits in Drafts rather than in Sent looking like it went out.
+      if (draftsMailbox) {
+        try {
+          await this.restoreEmailToDraft(emailId, draftsMailbox.id, sentMailbox?.id, submissionAccountId);
+        } catch (draftError) {
+          console.error('Failed to move the message back to Drafts after reschedule failure:', draftError);
+        }
+      }
+      throw new Error(`Reschedule failed and the message is no longer scheduled: ${message}`);
     }
-    return { scheduled: true, emailId, emailSubmissionId: replacementId, sendAt: finalSendAt };
+    const finalSendAt = replacement.sendAt || await this.getEmailSubmissionSendAt(replacement.id, submissionAccountId);
+    return { scheduled: true, emailId, emailSubmissionId: replacement.id, sendAt: finalSendAt };
   }
 
   // The third parameter is intentionally unused: this restores an undo-send /

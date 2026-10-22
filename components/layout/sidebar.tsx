@@ -88,6 +88,7 @@ import {
   type NotificationMutes,
 } from "@/lib/notification-mutes";
 import { serverSupportsEmailPush } from "@/lib/web-push";
+import { resolveFolderCounts } from "@/lib/folder-counts";
 
 interface SidebarProps {
   mailboxes: Mailbox[];
@@ -210,34 +211,43 @@ function SidebarRowCounts({
   unread,
   total,
   role,
+  mailboxId,
   onUnreadClick,
 }: {
   unread?: number;
   total?: number;
   role?: string | null;
+  mailboxId?: string;
   isSelected: boolean;
   onUnreadClick?: () => void;
 }) {
   const showFolderTotalCount = useSettingsStore(s => s.showFolderTotalCount);
   const mountainView = useSettingsStore(s => s.interfaceLayout === 'mountain-view');
+  // Per-folder override from the folder settings (#982).
+  const countMode = useSettingsStore(s => (mailboxId ? s.folderCountModes?.[mailboxId] : undefined));
+  const counts = resolveFolderCounts({
+    unread, total, role, mode: countMode,
+    showTotalGlobally: showFolderTotalCount, mountainView,
+  });
   // Mountain View counts one thing per row: what is unread, or for Drafts,
   // how many there are, since a draft is never unread.
   if (mountainView) {
-    const count = role === 'drafts' ? (total ?? 0) : (unread ?? 0);
+    const showsTotal = counts.total > 0;
+    const count = showsTotal ? counts.total : counts.unread;
     if (count === 0) return null;
     return (
       <span
-        className={cn("ms-2 flex-shrink-0 text-xs tabular-nums", role === 'drafts' ? "text-muted-foreground" : "font-bold text-foreground")}
+        className={cn("ms-2 flex-shrink-0 text-xs tabular-nums", showsTotal ? "text-muted-foreground" : "font-bold text-foreground")}
         data-testid="folder-counts"
         data-unread={unread ?? 0}
-        data-total={role === 'drafts' ? count : 0}
+        data-total={counts.total}
       >
         {count.toLocaleString()}
       </span>
     );
   }
-  const unreadCount = unread ?? 0;
-  const totalCount = showFolderTotalCount ? (total ?? 0) : 0;
+  const unreadCount = counts.unread;
+  const totalCount = counts.total;
 
   if (unreadCount === 0 && totalCount === 0) return null;
 
@@ -426,6 +436,7 @@ function SidebarRow({
               unread={unread}
               total={total}
               role={testRole}
+              mailboxId={testMailboxId}
               isSelected={isSelected}
               onUnreadClick={onUnreadClick}
             />
@@ -435,6 +446,11 @@ function SidebarRow({
     </div>
   );
 }
+
+/** A folder the server gave a role (inbox, sent, trash...), as opposed to one the user made. */
+const isSystemFolder = (node: MailboxNode) => !!node.role;
+/** Key of the single-account "Your folders" section in the collapsed set. */
+const OWN_FOLDERS_KEY = '__own__';
 
 function SidebarSectionHeader({
   label,
@@ -449,12 +465,16 @@ function SidebarSectionHeader({
   testId,
   onContextMenu,
   status,
+  onAdd,
+  addTitle,
 }: {
   label: string;
   expanded: boolean;
   onToggle: () => void;
   onSettings?: () => void;
   settingsTitle?: string;
+  onAdd?: () => void;
+  addTitle?: string;
   isCollapsed: boolean;
   first?: boolean;
   icon?: ReactNode;
@@ -497,6 +517,28 @@ function SidebarSectionHeader({
         {label}
       </span>
       {status}
+      {onAdd && (
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={(e) => {
+            e.stopPropagation();
+            onAdd();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              onAdd();
+            }
+          }}
+          className="ms-auto p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
+          title={addTitle}
+          aria-label={addTitle}
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </span>
+      )}
       {onSettings && (
         <span
           role="button"
@@ -512,7 +554,7 @@ function SidebarSectionHeader({
               onSettings();
             }
           }}
-          className="ms-auto p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
+          className={cn(!onAdd && "ms-auto", "p-1 rounded text-muted-foreground/70 hover:text-foreground hover:bg-muted transition-colors cursor-pointer")}
           title={settingsTitle}
         >
           <Settings className="w-3.5 h-3.5" />
@@ -790,6 +832,8 @@ function DemoBanner() {
   const handleReset = async () => {
     setIsResetting(true);
     router.push('/');
+    // Also put the seeded demo preferences (tags, merged inbox, templates) back.
+    try { localStorage.removeItem('bulwark-demo-seed'); } catch { /* storage blocked */ }
     await loginDemo();
     setIsResetting(false);
   };
@@ -955,6 +999,15 @@ function SidebarImpl({
     } catch { /* fall through */ }
     return new Set();
   });
+  // "Your folders" sections the user has collapsed: OWN_FOLDERS_KEY for the
+  // single-account list, the accountId for each Pro account group.
+  const [collapsedCustomFolders, setCollapsedCustomFolders] = useState<Set<string>>(() => {
+    try {
+      const stored = localStorage.getItem('sidebarCollapsedCustomFolders');
+      if (stored !== null) return new Set(JSON.parse(stored) as string[]);
+    } catch { /* fall through */ }
+    return new Set();
+  });
   const emailKeywords = useSettingsStore(s => s.emailKeywords);
   const nestedTags = useSettingsStore(s => s.nestedTags);
   const isEmbedded = useIsEmbedded();
@@ -1091,7 +1144,12 @@ function SidebarImpl({
   const mvFlat = mvShell && !isCollapsed;
   const isPrimaryFolder = (node: MailboxNode) =>
     node.role === 'inbox' || node.role === 'sent' || node.role === 'drafts';
-  const primaryTree = mvFlat ? ownTree.filter(isPrimaryFolder) : ownTree;
+  // Everywhere else the folders the user made sit in a "Your folders" section
+  // of their own below the system folders (#1205). Folders nested under a
+  // system folder stay with their parent. With no folders of your own there is
+  // no section, so the list looks as it always did.
+  const primaryTree = mvFlat ? ownTree.filter(isPrimaryFolder) : ownTree.filter(isSystemFolder);
+  const customTree = mvFlat ? [] : ownTree.filter((node) => !isSystemFolder(node));
   const secondaryTree = mvFlat ? ownTree.filter((node) => !isPrimaryFolder(node)) : [];
   // Of those, the system folders (archive, spam, trash...) go behind "More",
   // and the folders the user made are listed with the tags under "Labels",
@@ -1171,6 +1229,59 @@ function SidebarImpl({
         testName="scheduled"
         testMailboxId={mailboxId}
       />
+    );
+  };
+
+  // The "Your folders" section: the user's own top-level folders, under a
+  // heading of their own that collapses and offers to make a new one.
+  const renderCustomFolders = (
+    key: string,
+    tree: MailboxNode[],
+    {
+      sub = false,
+      selected,
+      onSelect,
+      active = true,
+      dragAccountId,
+    }: {
+      sub?: boolean;
+      selected: string;
+      onSelect?: (mailboxId: string) => void;
+      active?: boolean;
+      dragAccountId?: string | null;
+    },
+  ) => {
+    if (tree.length === 0) return null;
+    const expanded = !collapsedCustomFolders.has(key);
+    return (
+      // A Pro account group already carries the folders menu for the whole group.
+      <div data-testid="section-your-folders" onContextMenu={active && !sub ? handleFoldersHeaderContextMenu : undefined}>
+        <SidebarSectionHeader
+          label={t("your_folders")}
+          expanded={expanded}
+          onToggle={() => toggleCustomFolders(key)}
+          onAdd={active && onCreateFolder ? () => onCreateFolder() : undefined}
+          addTitle={t("create_folder")}
+          isCollapsed={isCollapsed}
+          sub={sub}
+          testId={`section-your-folders-header-${key}`}
+        />
+        {((expanded && !isCollapsed) || isCollapsed) && tree.map((node) => (
+          <MailboxTreeItem
+            key={node.id}
+            node={node}
+            selectedMailbox={selected}
+            expandedFolders={expandedFolders}
+            onMailboxSelect={onSelect}
+            onToggleExpand={handleToggleExpand}
+            isCollapsed={isCollapsed}
+            onUnreadFilterClick={active ? onUnreadFilterClick : undefined}
+            colorful={colorfulSidebarIcons}
+            onContextMenu={active ? handleMailboxContextMenu : undefined}
+            dragAccountId={dragAccountId}
+          />
+        ))}
+      </div>
     );
   };
 
@@ -1267,12 +1378,20 @@ function SidebarImpl({
       return next;
     });
   };
+  const toggleCustomFolders = (key: string) => {
+    setCollapsedCustomFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      try { localStorage.setItem('sidebarCollapsedCustomFolders', JSON.stringify(Array.from(next))); } catch { /* */ }
+      return next;
+    });
+  };
 
   // The tab now travels in the URL (#733) rather than through sessionStorage,
   // so a gear click is a link the user can also bookmark or share. It still
   // steers only this one open - the persisted default is written on tab click.
-  const openFolderSettings = () => { router.push(buildSettingsPath('folders')); };
-  const openKeywordSettings = () => { router.push(buildSettingsPath('keywords')); };
+  const openFolderSettings = () => { router.push(buildSettingsPath('organize', 'folders')); };
+  const openKeywordSettings = () => { router.push(buildSettingsPath('organize', 'tags')); };
 
   const {
     contextMenu: mailboxContextMenu,
@@ -1505,7 +1624,7 @@ function SidebarImpl({
                       </div>
                     ) : (
                       <>
-                        {tree.map((node) => (
+                        {tree.filter(isSystemFolder).map((node) => (
                           <Fragment key={node.id}>
                             <MailboxTreeItem
                               node={node}
@@ -1525,6 +1644,13 @@ function SidebarImpl({
                           </Fragment>
                         ))}
                         {isActive && !tree.some((node) => node.role === 'drafts') && renderScheduledRow(`scheduled-${account.id}`)}
+                        {renderCustomFolders(account.id, tree.filter((node) => !isSystemFolder(node)), {
+                          sub: true,
+                          selected: selectedKeyword || !isViewing ? "" : selectedMailbox,
+                          onSelect: (mailboxId) => onAccountMailboxSelect?.(isActive ? null : account.id, mailboxId),
+                          active: isActive,
+                          dragAccountId: isActive ? null : account.id,
+                        })}
                       </>
                     )}
                   </>
@@ -1616,6 +1742,11 @@ function SidebarImpl({
             )}
           </div>
         )}
+
+        {!useMultiAccount && renderCustomFolders(OWN_FOLDERS_KEY, customTree, {
+          selected: selectedKeyword ? "" : selectedMailbox,
+          onSelect: onMailboxSelect,
+        })}
 
         {mvFlat && !useMultiAccount && (
           <div data-mv-labels="">

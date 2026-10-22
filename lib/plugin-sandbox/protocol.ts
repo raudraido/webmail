@@ -44,6 +44,12 @@ export interface SlotInit {
   tier: PluginTier;
   /** Slot name the iframe should render a component for. */
   slot: SlotName;
+  /**
+   * The frame fills its panel instead of growing with its content: the
+   * plugin's root is as tall as the panel and scrolls inside, so it can pin
+   * controls at the bottom (a chat input). Only for panel slots.
+   */
+  fill?: boolean;
   /** Same bundle code as the background instance. */
   code: string;
   /**
@@ -85,8 +91,8 @@ export interface InitDoneMsg {
   type: 'init-done';
   /** Hook names the plugin registered. The host installs proxy handlers. */
   hooks: string[];
-  /** Slots the plugin claims. Used by the host to know when a slot is offered. */
-  slots: Array<{ name: SlotName; hasShouldShow: boolean; order: number }>;
+  /** Slots the plugin claims. Used by the host to know when a slot is offered. `fill`: a panel slot that fills its panel (see slot-layout.ts). */
+  slots: Array<{ name: SlotName; hasShouldShow: boolean; order: number; fill?: boolean; startFolded?: boolean }>;
   /**
    * Keyboard shortcuts the plugin declares. The host installs a global
    * keydown listener that dispatches to the `shortcut:<id>` hook when the
@@ -145,6 +151,48 @@ export interface SlotShouldShowResultMsg {
   show: boolean;
 }
 
+export interface FloatingDropdownRect {
+  left: number;
+  top: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+export interface FloatingDropdownOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+export interface FloatingDropdownOpenMsg {
+  type: 'floating-dropdown-open';
+  id: string;
+  rect: FloatingDropdownRect;
+  options: FloatingDropdownOption[];
+  multiple?: boolean;
+  selectedValues: string[];
+  singleValue?: string;
+  highlightedIndex: number;
+  ariaLabel?: string;
+}
+
+export interface FloatingDropdownUpdateMsg {
+  type: 'floating-dropdown-update';
+  id: string;
+  rect?: FloatingDropdownRect;
+  options?: FloatingDropdownOption[];
+  multiple?: boolean;
+  selectedValues?: string[];
+  singleValue?: string;
+  highlightedIndex?: number;
+}
+
+export interface FloatingDropdownCloseMsg {
+  type: 'floating-dropdown-close';
+  id: string;
+}
+
 export type SandboxToHost =
   | ReadyMsg
   | InitDoneMsg
@@ -153,7 +201,10 @@ export type SandboxToHost =
   | CallbackInvokeMsg
   | HookResultMsg
   | SlotResizeMsg
-  | SlotShouldShowResultMsg;
+  | SlotShouldShowResultMsg
+  | FloatingDropdownOpenMsg
+  | FloatingDropdownUpdateMsg
+  | FloatingDropdownCloseMsg;
 
 // ─── Host → Sandbox messages ─────────────────────────────────
 
@@ -198,6 +249,23 @@ export interface StreamEndMsg { type: 'stream-end'; streamId: string; error?: st
 /** Host → sandbox: upload progress of an api.proxy.fetch request. */
 export interface StreamProgressMsg { type: 'stream-progress'; streamId: string; loaded: number; total: number; }
 
+export interface FloatingDropdownSelectMsg {
+  type: 'floating-dropdown-select';
+  id: string;
+  option: FloatingDropdownOption;
+}
+
+export interface FloatingDropdownHighlightMsg {
+  type: 'floating-dropdown-highlight';
+  id: string;
+  index: number;
+}
+
+export interface FloatingDropdownDismissMsg {
+  type: 'floating-dropdown-dismiss';
+  id: string;
+}
+
 export type HostToSandbox =
   | InitMsg
   | StreamChunkMsg
@@ -210,7 +278,10 @@ export type HostToSandbox =
   | ThemeChangeMsg
   | SettingsChangeMsg
   | PropsUpdateMsg
-  | SlotShouldShowMsg;
+  | SlotShouldShowMsg
+  | FloatingDropdownSelectMsg
+  | FloatingDropdownHighlightMsg
+  | FloatingDropdownDismissMsg;
 
 // ─── Constants ───────────────────────────────────────────────
 

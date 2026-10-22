@@ -16,7 +16,96 @@ import { effectiveSettings } from '../plugin-settings';
 import { clampSlotHeight, clampSlotWidth, isInlineSlot, MAX_INLINE_SLOT_WIDTH } from './slot-layout';
 import type {
   SandboxToHost, HostToSandbox, InitMsg, InitPayload, StreamChunkMsg, StreamEndMsg, StreamProgressMsg,
+  FloatingDropdownOpenMsg, FloatingDropdownUpdateMsg, FloatingDropdownCloseMsg,
+  FloatingDropdownSelectMsg, FloatingDropdownHighlightMsg, FloatingDropdownDismissMsg,
+  FloatingDropdownOption, FloatingDropdownRect,
 } from './protocol';
+
+export type FloatingDropdownHostMsg = FloatingDropdownOpenMsg | FloatingDropdownUpdateMsg | FloatingDropdownCloseMsg;
+
+// ─── Floating dropdown messages ──────────────────────────────
+
+const MAX_DROPDOWN_OPTIONS = 500;
+const MAX_DROPDOWN_TEXT = 500;
+
+function str(v: unknown, max = MAX_DROPDOWN_TEXT): string | undefined {
+  return typeof v === 'string' ? v.slice(0, max) : undefined;
+}
+
+function clamp(v: unknown, min: number, max: number): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  return Math.min(Math.max(v, min), Math.max(min, max));
+}
+
+function cleanRect(r: unknown, frameW: number, frameH: number): FloatingDropdownRect | null {
+  if (!r || typeof r !== 'object') return null;
+  const o = r as Record<string, unknown>;
+  const left = clamp(o.left, 0, frameW);
+  const top = clamp(o.top, 0, frameH);
+  if (left === null || top === null) return null;
+  const bottom = clamp(o.bottom, top, frameH);
+  const width = clamp(o.width, 0, frameW - left);
+  if (bottom === null || width === null) return null;
+  return { left, top, bottom, width, height: bottom - top };
+}
+
+function cleanOptions(v: unknown): FloatingDropdownOption[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: FloatingDropdownOption[] = [];
+  for (const item of v.slice(0, MAX_DROPDOWN_OPTIONS)) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, unknown>;
+    const value = str(o.value);
+    const label = str(o.label);
+    if (value === undefined || label === undefined) continue;
+    out.push(o.disabled === true ? { value, label, disabled: true } : { value, label });
+  }
+  return out;
+}
+
+function cleanValues(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.slice(0, MAX_DROPDOWN_OPTIONS).filter((x): x is string => typeof x === 'string');
+}
+
+/**
+ * Check a floating-dropdown message from a plugin before the host renders
+ * it in its own DOM: drop messages with a bad id or shape, cap sizes, keep
+ * only string labels, and clamp the anchor rect (iframe coordinates) to the
+ * frame so a plugin can't put a host-drawn popup anywhere on the page.
+ */
+export function sanitizeFloatingDropdownMsg(
+  msg: FloatingDropdownHostMsg,
+  frameW: number,
+  frameH: number,
+): FloatingDropdownHostMsg | null {
+  const id = str(msg.id, 200);
+  if (!id) return null;
+  if (msg.type === 'floating-dropdown-close') return { type: msg.type, id };
+  const highlighted = typeof msg.highlightedIndex === 'number' && Number.isInteger(msg.highlightedIndex)
+    ? msg.highlightedIndex : undefined;
+  if (msg.type === 'floating-dropdown-open') {
+    const rect = cleanRect(msg.rect, frameW, frameH);
+    const options = cleanOptions(msg.options);
+    if (!rect || !options) return null;
+    return {
+      type: msg.type, id, rect, options,
+      multiple: msg.multiple === true,
+      selectedValues: cleanValues(msg.selectedValues) ?? [],
+      singleValue: str(msg.singleValue),
+      highlightedIndex: highlighted ?? -1,
+      ariaLabel: str(msg.ariaLabel),
+    };
+  }
+  const out: FloatingDropdownUpdateMsg = { type: 'floating-dropdown-update', id };
+  if (msg.rect !== undefined) { const r = cleanRect(msg.rect, frameW, frameH); if (r) out.rect = r; }
+  if (msg.options !== undefined) { const o = cleanOptions(msg.options); if (o) out.options = o; }
+  if (msg.selectedValues !== undefined) { const v = cleanValues(msg.selectedValues); if (v) out.selectedValues = v; }
+  if (typeof msg.multiple === 'boolean') out.multiple = msg.multiple;
+  if (typeof msg.singleValue === 'string') out.singleValue = str(msg.singleValue);
+  if (highlighted !== undefined) out.highlightedIndex = highlighted;
+  return out;
+}
 
 // ─── Callback marshalling ────────────────────────────────────
 
@@ -71,15 +160,19 @@ export interface SlotOptions {
   /** Resolved execution tier (from `resolvePluginTier`). */
   tier: PluginTier;
   extraProps: Record<string, unknown>;
+  /** The frame fills its panel instead of growing with its content (SlotInit.fill). */
+  fill?: boolean;
   /** Container element the visible slot iframe is mounted into. */
   hostContainer: HTMLElement;
   /** Called whenever the sandbox reports a new content size (width only for inline slots). */
   onResize: (height: number, width?: number) => void;
+  /** Called whenever the sandbox requests to open/update/close a floating dropdown. */
+  onFloatingDropdown?: (msg: FloatingDropdownHostMsg) => void;
 }
 
 export interface InitDoneInfo {
   hooks: string[];
-  slots: Array<{ name: SlotName; hasShouldShow: boolean; order: number }>;
+  slots: Array<{ name: SlotName; hasShouldShow: boolean; order: number; fill?: boolean; startFolded?: boolean }>;
   shortcuts: Array<{ id: string; keys: string; label: string; category?: string }>;
 }
 
@@ -164,12 +257,15 @@ export class SandboxInstance {
   private callbackTable = new Map<string, (...args: unknown[]) => unknown>();
   /** Ids in callbackTable that came from the current props. */
   private propCallbackIds = new Set<string>();
+  /** The init payload until it has been sent; props updates before that go into it. */
+  private pendingInit: InitPayload | null;
 
   constructor(
     private plugin: InstalledPlugin,
     initPayload: InitPayload,
     hostContainer: HTMLElement,
     private slotResizeCb: ((height: number, width?: number) => void) | null,
+    private slotFloatingDropdownCb?: ((msg: FloatingDropdownHostMsg) => void) | null,
   ) {
     this.pluginId = plugin.id;
     this.mode = initPayload.mode;
@@ -183,6 +279,7 @@ export class SandboxInstance {
       initPayload.extraProps = encodeCallbacks(initPayload.extraProps, this.callbackTable) as Record<string, unknown>;
       this.propCallbackIds = new Set([...this.callbackTable.keys()].filter((k) => !before.has(k)));
     }
+    this.pendingInit = initPayload;
 
     this.readyPromise = new Promise<void>((res) => { this.resolveReady = res; });
     this.initPromise = new Promise<InitDoneInfo>((res, rej) => {
@@ -230,6 +327,10 @@ export class SandboxInstance {
       // Starts at the widest it may get; the first resize shrinks it.
       this.iframe.style.width = `${MAX_INLINE_SLOT_WIDTH}px`;
       this.iframe.style.height = '0px';
+    } else if (initPayload.mode === 'slot' && initPayload.fill) {
+      // As tall as its panel; the plugin scrolls inside.
+      this.iframe.style.width = '100%';
+      this.iframe.style.height = '100%';
     } else {
       this.iframe.style.width = '100%';
       this.iframe.style.height = '0px';
@@ -243,14 +344,27 @@ export class SandboxInstance {
 
     this.listener = (ev) => this.onMessage(ev);
     window.addEventListener('message', this.listener);
+    // A sandboxed frame may navigate itself. The first load is the sandbox
+    // document; a later one is some other page, and the host posts hook
+    // payloads with targetOrigin '*' (the frame is opaque-origin), so it
+    // must stop talking to the frame rather than wait for timeouts.
+    let loads = 0;
+    this.iframe.addEventListener('load', () => {
+      loads++;
+      if (loads > 1 && !this.destroyed) {
+        this.rejectInit(new Error('sandbox frame navigated away'));
+        this.destroy();
+      }
+    });
     hostContainer.appendChild(this.iframe);
     liveInstances.add(this);
     if (this.mode === 'slot') ensureThemeWatcher();
 
     // Send init after the iframe runtime signals it's ready.
     this.readyPromise.then(() => {
-      if (this.destroyed) return;
-      const msg: InitMsg = { type: 'init', payload: initPayload };
+      if (this.destroyed || !this.pendingInit) return;
+      const msg: InitMsg = { type: 'init', payload: this.pendingInit };
+      this.pendingInit = null;
       this.send(msg);
     });
   }
@@ -360,6 +474,17 @@ export class SandboxInstance {
         this.slotResizeCb?.(height, width ?? undefined);
         return;
       }
+
+      case 'floating-dropdown-open':
+      case 'floating-dropdown-update':
+      case 'floating-dropdown-close': {
+        // The host draws this dropdown in its own DOM, so a malformed message
+        // must not crash the app, and the anchor must stay inside the frame.
+        const frame = this.iframe.getBoundingClientRect();
+        const clean = sanitizeFloatingDropdownMsg(msg, frame.width, frame.height);
+        if (clean) this.slotFloatingDropdownCb?.(clean);
+        return;
+      }
     }
   }
 
@@ -442,7 +567,19 @@ export class SandboxInstance {
     for (const id of this.propCallbackIds) this.callbackTable.delete(id);
     this.propCallbackIds = new Set(fresh.keys());
     for (const [id, fn] of fresh) this.callbackTable.set(id, fn);
+    // Before init has gone out the frame has no slot to update, and init
+    // would boot it with the callbacks just dropped: send the new props
+    // with init instead.
+    if (this.pendingInit?.mode === 'slot') {
+      this.pendingInit.extraProps = encoded;
+      return;
+    }
     this.send({ type: 'props-update', props: encoded });
+  }
+
+  sendFloatingDropdownEvent(msg: FloatingDropdownSelectMsg | FloatingDropdownHighlightMsg | FloatingDropdownDismissMsg): void {
+    if (this.destroyed) return;
+    this.send(msg);
   }
 
   destroy(): void {
@@ -530,8 +667,9 @@ export function createSlotInstance(opts: SlotOptions): SandboxInstance {
       httpOrigins: opts.plugin.httpOrigins,
     },
     extraProps: opts.extraProps,
+    ...(opts.fill ? { fill: true } : {}),
     locale: opts.locale,
     theme: snapshotHostTheme(),
   };
-  return new SandboxInstance(opts.plugin, payload, opts.hostContainer, opts.onResize);
+  return new SandboxInstance(opts.plugin, payload, opts.hostContainer, opts.onResize, opts.onFloatingDropdown);
 }

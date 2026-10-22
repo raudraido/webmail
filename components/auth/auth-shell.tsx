@@ -7,6 +7,7 @@ import { useShallow } from "zustand/react/shallow";
 import { Sun, Moon, Monitor, Check } from "@/components/icons";
 import { apiFetch, withBasePath } from "@/lib/browser-navigation";
 import { useThemeStore } from "@/stores/theme-store";
+import { usePolicyStore } from "@/stores/policy-store";
 import { useMenuNavigation } from "@/hooks/use-menu-navigation";
 import { cn } from "@/lib/utils";
 import { LanguageSwitcher } from "@/components/ui/language-switcher";
@@ -31,6 +32,8 @@ const THEME_OPTIONS: { value: Theme; icon: typeof Sun }[] = [
 // alone is enough; the opened dropdown still spells out each option since
 // three similar-looking icons aren't self-explanatory on their own.
 function ThemeToggle() {
+  // majutaja.com: respect the admin theme policy (#1280) - no toggle while the colour mode is locked.
+  const colorModeLocked = usePolicyStore((st) => st.getColorModePolicy().locked);
   const t = useTranslations("settings.appearance.theme");
   const { theme, setTheme } = useThemeStore(
     useShallow((s) => ({ theme: s.theme, setTheme: s.setTheme }))
@@ -62,6 +65,8 @@ function ThemeToggle() {
     setTheme(value);
     setOpen(false);
   };
+
+  if (colorModeLocked) return null;
 
   return (
     <div className="absolute bottom-4 left-4 sm:left-6" ref={containerRef}>

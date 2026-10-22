@@ -79,23 +79,37 @@ describe('settings search index (English messages)', () => {
     expect(labels).toContain('Free scrolling');
     expect(labels).toContain('Show week numbers');
     expect(labels).toContain('Organize invitations as');
+    expect(labels).toContain('Parse email invitations');
+    expect(labelsFor('notifications')).toContain('Unread Count on Tab and App Icon');
+    expect(labelsFor('notifications')).not.toContain('Parse email invitations');
     expect(labels).toContain('Contact birthday calendar');
     // Option values are not settings of their own.
     expect(labels).not.toContain('Disabled');
   });
 
   it('finds the newer mail settings on their tabs', () => {
-    expect(labelsFor('reading')).toContain('Clear search when switching folders');
-    expect(labelsFor('reading')).toContain('Swipe right action (mobile)');
+    expect(labelsFor('message_list')).toContain('Clear search when switching folders');
+    expect(labelsFor('message_list')).toContain('Swipe right action (mobile)');
+    expect(labelsFor('message_list')).toContain('Message list order');
+    expect(labelsFor('reading')).toContain('Trusted Senders');
+    expect(labelsFor('reading')).toContain('Email (.eml) filename');
+    expect(labelsFor('reading')).not.toContain('Delete Action');
     expect(labelsFor('composing')).toContain('Undo send / send delay');
     expect(labelsFor('composing')).toContain('Request read receipts by default');
-    expect(labelsFor('appearance')).toContain('Message list order');
-    expect(labelsFor('layout')).toContain('Pro Interface (Experimental)');
-    expect(labelsFor('language')).toContain('Time zone');
+    expect(labelsFor('composing')).toContain('Email Templates');
+    expect(labelsFor('composing')).not.toContain('Sub-Address Delimiter');
+    expect(labelsFor('appearance')).toContain('Pro Interface (Experimental)');
+    expect(labelsFor('account')).toContain('Tell accounts apart');
+    expect(labelsFor('account')).toContain('Your Identities');
+    expect(labelsFor('appearance')).toContain('Themes');
+    expect(labelsFor('general')).toContain('Time zone');
+    expect(labelsFor('general')).toContain('Email links');
+    expect(labelsFor('organize')).toContain('Nested Tags');
+    expect(haystackFor('organize')).toContain('standard folder roles');
   });
 
   it('matches the calendar tab for a free-scroll query', () => {
     expect(haystackFor('calendar')).toContain('free scrolling');
-    expect(haystackFor('language')).toContain('time zone');
+    expect(haystackFor('general')).toContain('time zone');
   });
 });
