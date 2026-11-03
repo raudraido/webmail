@@ -48,7 +48,7 @@ function MailLayoutPreview({
                   <div
                     key={row.subject}
                     className={cn(
-                      'border-b border-border px-2 py-1.5 text-[10px] last:border-b-0',
+                      'border-b border-border px-2 py-1.5 text-[0.625rem] last:border-b-0',
                       row.selected && 'bg-primary/10'
                     )}
                   >
@@ -72,7 +72,7 @@ function MailLayoutPreview({
                 <div
                   key={row.subject}
                   className={cn(
-                    'border-b border-border px-2 py-1 text-[10px] last:border-b-0',
+                    'border-b border-border px-2 py-1 text-[0.625rem] last:border-b-0',
                     row.selected && 'bg-primary/10'
                   )}
                 >
@@ -92,7 +92,7 @@ function MailLayoutPreview({
                   <div
                     key={row.subject}
                     className={cn(
-                      'border-b border-border px-2 py-1 text-[10px] last:border-b-0',
+                      'border-b border-border px-2 py-1 text-[0.625rem] last:border-b-0',
                       row.selected && 'bg-primary/10'
                     )}
                   >
@@ -245,6 +245,7 @@ export function MultipleAccountsSection() {
   const mailboxes = useEmailStore(s => s.mailboxes);
   const hasGroupInboxes = useMemo(() => mailboxes.some(m => m.isShared), [mailboxes]);
   const showSharedMailAccounts = useSettingsStore(s => s.showSharedMailAccounts);
+  const compactSharedMailboxes = useSettingsStore(s => s.compactSharedMailboxes);
   const hiddenSharedMailAccounts = useSettingsStore(s => s.hiddenSharedMailAccounts);
   const hiddenSharedIds = hiddenSharedMailIds(hiddenSharedMailAccounts, activeAccountId);
   const sharedMailAccounts = useMemo(() => {
@@ -446,6 +447,19 @@ export function MultipleAccountsSection() {
             </SettingItem>
           ))}
         </div>
+      )}
+
+      {sharedMailAccounts.length > 0 && showSharedMailAccounts && !isSettingHidden('compactSharedMailboxes') && (
+        <SettingItem
+          label={t('compact_shared_mailboxes.label')}
+          description={t('compact_shared_mailboxes.description')}
+          locked={isSettingLocked('compactSharedMailboxes')}
+        >
+          <ToggleSwitch
+            checked={compactSharedMailboxes}
+            onChange={(v) => updateSetting('compactSharedMailboxes', v)}
+          />
+        </SettingItem>
       )}
     </SettingsSection>
   );

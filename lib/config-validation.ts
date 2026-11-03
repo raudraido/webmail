@@ -34,6 +34,7 @@ const configValidators = {
   oauthClientId: isString,
   oauthIssuerUrl: isString,
   oauthScopes: isString,
+  oauthResource: isString,
   rememberMeEnabled: isBoolean,
   settingsSyncEnabled: isBoolean,
   stalwartFeaturesEnabled: isBoolean,
@@ -48,6 +49,7 @@ const configValidators = {
   loginImprintUrl: isString,
   loginPrivacyPolicyUrl: isString,
   loginWebsiteUrl: isString,
+  loginUsernamePlaceholder: isString,
   loginLogoMaxHeight: isString,
   loginLogoMaxWidth: isString,
   loginShowHeading: isBoolean,
@@ -64,6 +66,22 @@ const configValidators = {
   embeddedMode: isBoolean,
   parentOrigin: isString,
   sourceCodeUrl: isString,
+  accessibilityStatementUrl: isString,
+  accessibilityFeedbackUrl: isString,
+  helpUrl: isString,
+  easyReadUrl: isString,
+  signLanguageUrl: isString,
+  noThirdPartyTraffic: isBoolean,
+  // Lite only (lib/lite-config.ts); the server's response leaves it out.
+  oauthRevokeOnSignOut: (value): value is boolean | undefined => value === undefined || typeof value === 'boolean',
+  // Absent from Lite's config and from servers before 1.20.
+  errorReporting: (value): value is ConfigData['errorReporting'] => value === undefined || (
+    isRecord(value)
+    && typeof value.dsn === 'string'
+    && typeof value.sampleRate === 'number'
+    && typeof value.environment === 'string'
+    && typeof value.collect === 'boolean'
+  ),
 } satisfies Validators<ConfigData>;
 
 /**
@@ -79,6 +97,24 @@ export function httpUrlOrEmpty(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+const EMAIL_RE = /^[^\s@<>()"',;:\\/?#]+@[^\s@<>()"',;:\\/?#]+\.[^\s@<>()"',;:\\/?#]+$/;
+
+/**
+ * An absolute http(s) URL, a mailto: link, or an email address made into
+ * one; '' for anything else. For links that may point at a mailbox, such
+ * as the accessibility feedback address.
+ */
+export function httpOrMailtoOrEmpty(value: unknown): string {
+  const url = httpUrlOrEmpty(value);
+  if (url || typeof value !== 'string') return url;
+  const trimmed = value.trim();
+  if (/^mailto:/i.test(trimmed)) {
+    const address = trimmed.slice('mailto:'.length).split('?')[0];
+    return EMAIL_RE.test(address) ? trimmed : '';
+  }
+  return EMAIL_RE.test(trimmed) ? `mailto:${trimmed}` : '';
 }
 
 /** Validate the server's complete response without rewriting configured values. */

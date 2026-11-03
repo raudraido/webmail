@@ -14,6 +14,7 @@ import { extractTheme } from '@/lib/plugin-validator';
 import { BUILTIN_THEMES } from '@/lib/builtin-themes';
 import { usePolicyStore } from '@/stores/policy-store';
 import { apiFetch } from '@/lib/browser-navigation';
+import { fetchServerPluginList } from '@/lib/server-plugin-list';
 import { themeHooks } from '@/lib/plugin-hooks';
 import { syncThemeColorMeta } from '@/lib/theme-color-meta';
 import { IS_LITE } from '@/lib/lite';
@@ -162,6 +163,13 @@ export const useThemeStore = create<ThemeState>()(
 
         if (effectiveThemeId !== activeThemeId) {
           set({ activeThemeId: effectiveThemeId });
+        }
+
+        // No theme in effect: drop the copy the boot script may have put back
+        // from the cache (lib/boot-skeleton/boot-script.ts, applyBootTheme).
+        if (!effectiveThemeId) {
+          removeThemeCSS();
+          removeThemeSkinCSS();
         }
 
         // Apply active custom theme on boot
@@ -374,11 +382,11 @@ export const useThemeStore = create<ThemeState>()(
 
         themeSyncPromise = (async () => {
           try {
-            const res = await apiFetch('/api/plugins');
+            const res = await fetchServerPluginList();
             if (!res.ok) return;
 
-            const data: { themes: ServerThemeInfo[] } = await res.json();
-            if (!data.themes || !Array.isArray(data.themes)) return;
+            const data = res.data as { themes: ServerThemeInfo[] };
+            if (!data?.themes || !Array.isArray(data.themes)) return;
 
             const serverThemes = data.themes;
 

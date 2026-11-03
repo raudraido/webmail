@@ -12,7 +12,7 @@ const localePrefix = (process.env.NEXT_PUBLIC_LOCALE_PREFIX ?? 'never') as
   | 'always'
   | 'as-needed';
 
-const SUPPORTED_LOCALES = ['ar', 'ca', 'cs', 'da', 'de', 'en', 'es', 'et', 'fa', 'fr', 'he', 'hu', 'it', 'ja', 'ko', 'lv', 'mn', 'nb', 'nl', 'pl', 'pt', 'ro', 'ru', 'sk', 'tr', 'uk', 'zh', 'zh-TW'] as const;
+const SUPPORTED_LOCALES = ['ar', 'ca', 'cs', 'da', 'de', 'en', 'es', 'et', 'fa', 'fr', 'he', 'hu', 'it', 'ja', 'ko', 'lv', 'mn', 'nb', 'nl', 'pl', 'pt', 'ro', 'ru', 'sk', 'th', 'tr', 'uk', 'vi', 'zh', 'zh-TW'] as const;
 
 // Locale a visitor gets with no URL locale prefix and no NEXT_LOCALE cookie
 // yet - i.e. the locale next-intl's middleware renders by default. Admins set

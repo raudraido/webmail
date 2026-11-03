@@ -1,5 +1,7 @@
 import type { CredentialSpec } from './plugin-secrets/credentials';
 import type { CatalogSlotName } from './plugin-slot-catalog';
+import { ASSISTANT_PERMISSIONS, type AssistantHostFeatures } from './plugin-sandbox/assistant/types';
+import type { AttachmentExtrasB, EmailReadViewExtrasB } from './plugin-sandbox/assistant/b.types';
 
 // Plugin & Theme system types
 
@@ -395,8 +397,16 @@ export interface KeyboardShortcut {
 // ─── Read-Only View Types ────────────────────────────────────
 // Projected views exposed to plugins - no direct store references
 
-export interface EmailReadView {
+export interface EmailReadView extends EmailReadViewExtrasB {
   id: string;
+  /**
+   * The JMAP account the message is in. Message ids repeat across accounts
+   * (own, shared, group), so pass it to email.get / getRaw / getAttachment /
+   * setKeyword to name this very message. Always set on what email.get,
+   * list and search return; elsewhere set at least when messages of several
+   * accounts are listed together.
+   */
+  accountId?: string;
   threadId: string;
   mailboxIds: string[];
   from: { name: string; email: string }[];
@@ -410,9 +420,10 @@ export interface EmailReadView {
   /**
    * The message's attachments. `blobId` is what `email.getAttachment`
    * takes. Inline images are included and marked. Empty until the host has
-   * loaded the message's body structure.
+   * loaded the message's body structure. An image the HTML shows inline
+   * also has its `cid` and, when the sender wrote one, its `alt` text.
    */
-  attachments: { blobId: string; name: string; type: string; size: number; inline: boolean }[];
+  attachments: ({ blobId: string; name: string; type: string; size: number; inline: boolean } & AttachmentExtrasB)[];
   preview: string;
   keywords: string[];
   /** Full plain-text body of the message (HTML-only bodies are stripped to
@@ -462,6 +473,8 @@ export interface EmailSummary {
   keywords: string[];
   hasAttachment: boolean;
   size: number;
+  /** See EmailReadView.accountId. */
+  accountId?: string;
 }
 
 export interface DraftView {
@@ -576,6 +589,60 @@ export interface TaskInput {
   priority?: number;
   /** Defaults to the tasks calendar, else the default calendar. */
   calendarId?: string;
+  /**
+   * The task's reminders by id (1-64 of `A-Z a-z 0-9 . _ -`); a task holds
+   * at most 5. On update only the ids named change: an alert given is set
+   * (one kept with the same trigger and action stays acknowledged; a new
+   * trigger, a snooze, makes it fire again), an id given null is removed,
+   * and alerts not named are left as they are. null for the whole map
+   * removes every alert. While the task uses its calendar's default alerts
+   * (TaskView.useDefaultAlerts), any change makes the defaults the task's
+   * own under new ids; `{}` does only that.
+   */
+  alerts?: Record<string, TaskAlertInput | null> | null;
+  /**
+   * Links by id (1-64 of `A-Z a-z 0-9 . _ -`), at most 10: an http(s) URL,
+   * a `mailto:` address or a path of this Bulwark (`/mail/...`), stored as
+   * its full URL. Merged by id on update as `alerts` is; links another app
+   * wrote stay unless named with null.
+   */
+  links?: Record<string, TaskLinkInput | null> | null;
+  /**
+   * What the task relates to, by a mail's Message-ID (with its angle
+   * brackets) or another calendar object's UID; at most 10. Merged by key on
+   * update as `alerts` is.
+   */
+  relatedTo?: Record<string, TaskRelationInput | null> | null;
+}
+
+/**
+ * When a task's alert fires: an ISO 8601 duration from the task's due
+ * (`-PT15M` before, `PT0S` at it; `relativeTo: 'start'` counts from its
+ * start, else from its due), at most a year either way; or an instant in
+ * UTC (`2026-05-01T07:30:00Z`).
+ */
+export type TaskAlertTrigger =
+  | { offset: string; relativeTo?: 'due' | 'start' }
+  | { at: string };
+
+export interface TaskAlertInput {
+  trigger: TaskAlertTrigger;
+  /** `display` (the default) shows a reminder; `email` has the server send one. */
+  action?: 'display' | 'email';
+}
+
+export interface TaskLinkInput {
+  /** Up to 2048 characters. */
+  href: string;
+  /** A link relation such as `describedby` or `author` (RFC 8288), lower case. */
+  rel?: string;
+  /** Up to 500 characters. */
+  title?: string;
+}
+
+export interface TaskRelationInput {
+  /** How it relates, as in JSCalendar: `parent`, `child`, `first`, `next` or another lower-case type; at most 4. */
+  relation?: string[];
 }
 
 export interface ContactView {
@@ -641,6 +708,37 @@ export interface TaskView {
   priority: number;
   calendarId: string;
   keywords: string[];
+  /** By id; as written by any app, not only by plugins. */
+  alerts: Record<string, TaskAlertView>;
+  /**
+   * True while the task uses its calendar's default alerts: `alerts` then
+   * shows those defaults, which can't be acknowledged until an update of
+   * `alerts` makes them the task's own (under new ids).
+   */
+  useDefaultAlerts: boolean;
+  /** By id; as written by any app (an attachment's link too). */
+  links: Record<string, TaskLinkView>;
+  /** By Message-ID or UID. */
+  relatedTo: Record<string, TaskRelationView>;
+}
+
+export interface TaskAlertView {
+  /** As in TaskAlertInput; `relativeTo` is always given for an offset. */
+  trigger: { offset: string; relativeTo: 'due' | 'start' } | { at: string };
+  action: 'display' | 'email';
+  /** When the alert was dismissed (UTC), or null while it is not. */
+  acknowledged: string | null;
+}
+
+export interface TaskLinkView {
+  href: string;
+  rel: string | null;
+  title: string | null;
+  contentType: string | null;
+}
+
+export interface TaskRelationView {
+  relation: string[];
 }
 
 export interface TemplateView {
@@ -727,6 +825,34 @@ export interface ComposeInput {
 export type DraftInput = ComposeInput;
 
 /**
+ * What a plugin passes to `api.email.forward`. The host builds the forward
+ * (subject with the forward prefix, the plugin's note, the original's
+ * header lines and text) and sends it from the user's default address.
+ */
+export interface EmailForwardInput {
+  /** 1-10 recipients, `a@example.com` or `Name <a@example.com>`. */
+  to: string[];
+  /** A note above the forwarded message, plain text, up to 64 KB. */
+  text?: string;
+  /**
+   * Which attachments of the original go along, by blobId (attachments of
+   * that message only). Default: every attachment that isn't an inline image.
+   */
+  attachments?: string[];
+  /** The account the message is in, as on EmailReadView (team and shared mailboxes). */
+  accountId?: string;
+}
+
+/**
+ * What `api.email.forward` resolves to. `declined`: the user didn't let the
+ * plugin forward to a new address; `stopped`: a pre-send check or another
+ * plugin's onBeforeEmailSend stopped the send.
+ */
+export type EmailForwardResult =
+  | { sent: true; emailId: string | null; to: string[]; scheduledFor: string | null }
+  | { sent: false; reason: 'declined' | 'stopped' };
+
+/**
  * What a plugin passes to `api.notifications.show`. The plugin's name is
  * added to what the user sees, so they know who sent it.
  */
@@ -769,12 +895,20 @@ export interface QuotaView {
   percentUsed: number;
 }
 
-export interface CalendarAlertView {
-  id: string;
-  eventId: string;
-  eventTitle: string;
-  triggerTime: string;
-}
+/**
+ * A reminder that is due: an event's display alert or a task's. `id` is the
+ * alert's id within its event or task; `triggerTime` when it fired (UTC).
+ * A task's reaches only plugins with `tasks:read`, an event's only plugins
+ * with `calendar:read`.
+ */
+export type CalendarAlertView =
+  | { id: string; eventId: string; eventTitle: string; triggerTime: string }
+  | { id: string; taskId: string; taskTitle: string; triggerTime: string };
+
+/** A reminder's toast closed by the user (onCalendarAlertAcknowledge). */
+export type CalendarAlertAcknowledgeView =
+  | { alertId: string; eventId: string }
+  | { alertId: string; taskId: string };
 
 export interface SearchFilters {
   from?: string;
@@ -825,6 +959,27 @@ export interface AppInfoView {
   stalwartFeatures: boolean;
   /** A demo installation with sample data. */
   demoMode: boolean;
+}
+
+/**
+ * Features of Bulwark itself that replace what a plugin did, as
+ * `api.host.features` tells the plugin (no permission needed). A plugin
+ * that does the same job steps back while one is true. Missing on hosts
+ * older than 1.19.0, so read it as `api.host?.features?.x === true`.
+ */
+export interface HostFeaturesView extends AssistantHostFeatures {
+  /** The admin turned on the "External" label on mail from outside the organisation (organisation.externalMail.senderLabel). */
+  externalSenderLabel: boolean;
+  /** The admin turned on the confirm before sending outside the organisation (organisation.externalMail.recipientWarning). */
+  externalRecipientWarning: boolean;
+  /**
+   * Bulwark 1.20 and later: "no third-party traffic" is on (or not known
+   * yet). Outside services are off: the proxy refuses servers fixed in a
+   * manifest and only reaches those the admin entered on the plugin's admin
+   * page. A plugin switches such a service off instead of treating it as
+   * down.
+   */
+  noThirdPartyTraffic: boolean;
 }
 
 /** One setting `api.app.searchSettings` found, in the user's language. */
@@ -885,6 +1040,8 @@ export interface EmailListBadge {
   color?: string;
   /** Tooltip / aria-label */
   title?: string;
+  /** Name of a host icon (see components/icons) shown before the label, e.g. "check" or "user". */
+  icon?: string;
 }
 
 // ─── Message-list category tabs (Gmail-style inbox tabs) ─────
@@ -1023,6 +1180,35 @@ export interface MailtoContext {
  * copy. Use to inject signatures, rewrite links, strip tracking pixels from
  * forwards, encrypt the body, etc. Return undefined to pass through unchanged.
  */
+/** An attachment of an OutgoingEmail. */
+export interface OutgoingAttachment {
+  name: string;
+  /** The type the file was attached with (often the browser's guess from the extension). */
+  type: string;
+  size: number;
+  /** onBeforeEmailSend, 1.20 and later: the uploaded blob. */
+  blobId?: string;
+  /** onBeforeEmailSend, 1.20 and later: an image shown in the body (pasted or quoted). */
+  inline?: boolean;
+  /**
+   * onBeforeEmailSend, 1.20 and later: the type the file's first bytes say
+   * it is (application/x-msdownload for a program, application/zip, ...);
+   * absent when Bulwark knows no signature for them or couldn't read them.
+   */
+  sniffedType?: string;
+  /**
+   * onBeforeEmailSend, 1.20 and later, plugins with `email:blob-read` only:
+   * up to the first megabyte of a text attachment (text/*, CSV, JSON, XML,
+   * calendar and contact files) as text.
+   */
+  textExcerpt?: string;
+  /**
+   * onBeforeEmailSend, 1.20 and later: Bulwark couldn't read the file, so
+   * there is no sniffedType or textExcerpt. Treat it as not checked.
+   */
+  unreadable?: boolean;
+}
+
 export interface OutgoingEmail {
   to: string[];
   cc: string[];
@@ -1033,11 +1219,33 @@ export interface OutgoingEmail {
   identityId: string;
   /** Sender email derived from the active identity (incl. sub-address tag, when set) */
   fromEmail?: string;
-  attachments: { name: string; type: string; size: number }[];
+  attachments: OutgoingAttachment[];
   /** Original message id when this is a reply or forward */
   inReplyTo?: string;
   /** Free-form custom headers added by the composer or earlier handlers */
   headers?: Record<string, string>;
+  /**
+   * Where the send comes from (onBeforeEmailSend, Bulwark 1.20 and later):
+   * the composer, a quick reply under a message, or a plugin's forward.
+   */
+  surface?: 'composer' | 'quick-reply' | 'plugin-forward';
+  /** compose, reply, replyAll or forward (onBeforeEmailSend, 1.20 and later). */
+  mode?: 'compose' | 'reply' | 'replyAll' | 'forward';
+  /**
+   * onBeforeEmailSend, 1.20 and later: what the user wrote, as plain text,
+   * without the quoted original of a reply or forward and without the
+   * signature. Check this rather than the bodies, or a number in the quoted
+   * mail warns on every reply.
+   */
+  authoredText?: string;
+  /**
+   * onBeforeEmailSend, 1.20 and later: the recipients (To, Cc and Bcc)
+   * outside the organisation of the account the mail goes out from, as bare
+   * lowercase addresses. The host works it out from the account's identity
+   * domains and the admin's organisation domains, also when the admin's
+   * recipient warning is off. Empty when every recipient is internal.
+   */
+  externalRecipients?: string[];
 }
 /**
  * Passed to onBeforeDraftAutoSave handlers as a transform value.
@@ -1105,7 +1313,8 @@ export interface QuoteHeader {
   text: string;
   /**
    * When false, the composer skips its default blockquote wrapping around the
-   * quoted body (HTML mode only). Use this for the Outlook style where the
+   * quoted body, including HTML islands and nested blockquotes (HTML mode only).
+   * This preference persists when saving/reopening drafts. Use this for the Outlook style where the
    * quoted message is intended to follow the header without indentation.
    * Defaults to true (preserve the existing blockquote wrapping).
    */
@@ -1123,6 +1332,13 @@ export interface AttachmentInfo {
   blobId?: string;
   /** The email this attachment belongs to (download / preview) */
   emailId?: string;
+  /**
+   * onBeforeAttachmentUpload, 1.20 and later, for a file from this device:
+   * the type its first bytes say it is (see OutgoingAttachment.sniffedType).
+   */
+  sniffedType?: string;
+  /** onBeforeAttachmentUpload, 1.20 and later: the file's bytes couldn't be read. */
+  unreadable?: boolean;
 }
 
 /**
@@ -1138,6 +1354,26 @@ export interface PluginAttachmentUpload {
   type: string;
   size: number;
 }
+
+/** Own text and metadata of one open composer, with an opaque edit revision. */
+export type ComposerSnapshot = {
+  revision: string;
+  subject: string;
+  text: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  attachments: { id: string; name: string; type: string; size: number }[];
+  pending: boolean;
+};
+
+/** Bytes of a file still attached to the selected composer. */
+export type ComposerAttachmentData = {
+  name: string;
+  type: string;
+  size: number;
+  data: ArrayBuffer;
+};
 
 /**
  * Initial value passed to the onAttachmentPreview transform hook. A handler
@@ -1157,11 +1393,21 @@ export interface AttachmentPreview {
  * Return false to cancel the navigation. Mutate `href` to rewrite it.
  */
 export interface ExternalLinkContext {
+  /**
+   * The address as the browser parses it (`new URL(href).href`, Bulwark
+   * 1.20 and later); exactly this string opens.
+   */
   href: string;
   /** Anchor target ('_blank', '_self', etc.) when set */
   target?: string;
   /** Email currently in view, when the click came from an email body */
   emailId?: string;
+  /**
+   * What the link says (its text, else an image's alt text), trimmed to 200
+   * characters, when the host knows it (Bulwark 1.20 and later). A link
+   * whose text names another address than its target is a phishing sign.
+   */
+  text?: string;
 }
 
 /**
@@ -1188,19 +1434,39 @@ export interface ConflictWarning {
 }
 
 /**
- * Returned by onProvideSearchResults transform handlers. Plugins extend the
- * initial array with their own results (CRM hits, Slack messages, etc.).
- * The host renders these in a grouped section below native email results.
+ * Returned by onProvideSearchResults handlers: results from elsewhere (CRM
+ * hits, chat messages, ...) for the search that is running. The host draws
+ * them as a block above the search's message list, grouped by `source`.
+ * A click on an entry that names a message the user can reach (`email`)
+ * opens it in the reader, as a click on a row of the list does. Any other
+ * click reaches the plugin that returned the entry as `onAction`, with
+ * `surface: 'search-results'`, the entry's `key` as `actionId` and the
+ * search's `query` in the context. Plain text only, but the snippet may
+ * mark what matched as SearchSnippet/get does; see
+ * lib/plugin-search-results.ts for the limits.
  */
 export interface ExternalSearchResult {
-  /** Stable unique key */
+  /** Unique among the plugin's entries for this search; comes back as actionId. */
   key: string;
   title: string;
+  /**
+   * May wrap what matched in `<mark>`…`</mark>`, highlighted as the list's
+   * own search snippets; `&`, `<`, `>` meant as text escaped as `&amp;`,
+   * `&lt;`, `&gt;`. No other markup: any other tag shows as text.
+   */
   snippet: string;
-  /** Plugin-handled action when the result row is clicked */
-  onClick: () => void;
-  /** Optional source label, e.g. "Slack", "Notion" */
+  /** Group heading, e.g. "CRM", "Slack"; the plugin's name when missing. */
   source?: string;
+  /** The message the entry stands for, opened in the reader on a click. */
+  email?: SearchResultEmail;
+}
+
+/** A message named by a search result. */
+export interface SearchResultEmail {
+  /** The message's JMAP id. */
+  id: string;
+  /** The JMAP account holding it (a shared or group account); the signed-in account's own when missing. */
+  accountId?: string;
 }
 
 /**
@@ -1294,11 +1560,21 @@ export const ALL_PERMISSIONS = [
   // Open the composer filled in (api.compose.open). Low risk: the user still
   // has to press Send.
   'compose:open',
-  // Read the message being written (api.composer.getBody/getSelection), in
+  // Read the message being written (api.composer.getBody/getSelection/getSnapshot), in
   // a composer that handed the plugin its id.
   'compose:read',
   // Change the message being written (api.composer.replaceSelection/replaceBody).
   'compose:write',
+  // Check the text of every open composer while the user types
+  // (api.composer.registerChecker): the host sends the plugin what the user
+  // writes, without the user pointing it at a composer, and draws its
+  // results as underlines. Only where the user (or the admin) turned
+  // proofreading on, and never for a message that will be signed or encrypted.
+  // A checker that checks only when asked needs compose:read instead.
+  'compose:check',
+  // Forward a message of the account with its attachments, without the
+  // composer (api.email.forward). The host asks the user once per address.
+  'email:forward',
   'calendar:read', 'calendar:write',
   'contacts:read', 'contacts:write',
   'files:read', 'files:write',
@@ -1312,6 +1588,8 @@ export const ALL_PERMISSIONS = [
   'auth:observe',
   'auth:emit',
   'account:read',
+  // Look people up in the server's directory (api.user.findPeople).
+  'directory:read',
   'http:post', 'http:fetch',
   'ui:observe', 'ui:toolbar', 'ui:app-top-banner', 'ui:email-banner', 'ui:email-footer', 'ui:contact-cryptokeys',
   'ui:email-details',
@@ -1331,6 +1609,8 @@ export const ALL_PERMISSIONS = [
   'http:proxy',
   'admin:config',
   'app:lifecycle',
+  // The AI assistant's host APIs, one list per area (lib/plugin-sandbox/assistant).
+  ...ASSISTANT_PERMISSIONS,
 ] as const;
 
 export type Permission = (typeof ALL_PERMISSIONS)[number];

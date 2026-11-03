@@ -12,14 +12,20 @@ import {
   directoryJson,
   getDirectoryChannel,
   getDirectoryUrl,
+  directoryOff,
+  DIRECTORY_OFF_MESSAGE,
   historyFor,
   installedExtensions,
   installedStateOf,
+  readBundleBytes,
   toListing,
   v2Url,
   type DirectoryDetail,
   type DirectoryVersion,
 } from '@/lib/admin/marketplace-directory';
+import { MAX_PLUGIN_SIZE, MAX_THEME_SIZE } from '@/lib/plugin-types';
+import { productName } from '@/lib/product-name';
+import { withAppName } from '@/lib/settings-search';
 
 const MAX_PREVIEW_SOURCE_LEN = 100_000;
 
@@ -36,6 +42,7 @@ function versionRow(v: DirectoryVersion) {
     sha256: v.sha256,
     yanked: v.yanked,
     changelog: v.changelog ?? null,
+    notes: v.notes ?? null,
     downloads: v.downloads ?? 0,
     signed: !!v.signature,
     commit: v.provenance?.source?.commit ?? null,
@@ -63,6 +70,9 @@ export async function GET(
   try {
     const result = await requireAdminAuth(request);
     if ('error' in result) return result.error;
+    if (await directoryOff()) {
+      return NextResponse.json({ error: DIRECTORY_OFF_MESSAGE, code: 'no-third-party-traffic' }, { status: 403 });
+    }
 
     const { slug } = await params;
     const requested = request.nextUrl.searchParams.get('version');
@@ -118,7 +128,7 @@ export async function GET(
         if (!bundleRes.ok) {
           bundleError = `Bundle download failed (${bundleRes.status})`;
         } else {
-          const buffer = await bundleRes.arrayBuffer();
+          const buffer = await readBundleBytes(bundleRes, type === 'theme' ? MAX_THEME_SIZE : MAX_PLUGIN_SIZE);
           bundleSize = buffer.byteLength;
           signature = await checkBundleSignature({
             directoryUrl,
@@ -165,6 +175,7 @@ export async function GET(
     const installed = await installedExtensions();
     const state = installedStateOf(installed, slug, type);
     const history = await historyFor(type, slug);
+    const appName = productName(configManager.get<string>('appName'));
 
     return NextResponse.json(
       {
@@ -177,7 +188,8 @@ export async function GET(
           screenshots: detail.screenshots ?? [],
           themePreviews: detail.themePreviews ?? [],
           advisories: detail.advisories ?? [],
-          permissionDetails: detail.permissions ?? [],
+          // The directory ships the webmail's permission texts unfilled.
+          permissionDetails: (detail.permissions ?? []).map((p) => withAppName(p, appName) as typeof p),
           source: detail.source,
           createdAt: detail.createdAt ?? null,
           updatedAt: detail.updatedAt ?? null,

@@ -16,8 +16,15 @@
  */
 
 import { configManager } from '@/lib/admin/config-manager';
+import { logger } from '@/lib/logger';
 import { parseJmapServers, resolveTrustedJmapUrl } from '@/lib/admin/jmap-servers';
 import { fetchPublicUrl, type PublicFetchResponse } from '@/lib/security/url-guard';
+import { observeUpstream } from '@/lib/metrics/upstream';
+import {
+  isStoredCredentialRefused,
+  recordStoredCredentialStatus,
+  refusedCredentialResponse,
+} from '@/lib/stalwart/stored-credential-budget';
 
 const MAX_REDIRECTS = 5;
 /** Deadline for one upstream request when the caller sets none. */
@@ -55,10 +62,38 @@ function headersToRecord(init: HeadersInit | undefined): Record<string, string> 
  * re-validated: `Authorization` is dropped when the origin changes, and a
  * 303 (or 301/302 on a POST) downgrades to GET like `fetch` would. Pass
  * `redirect: 'manual'` to get the 3xx response back instead.
+ *
+ * A credential the server refused is not sent again for a while; the call
+ * gets a 401 without a request (lib/stalwart/stored-credential-budget.ts).
  */
 export async function fetchJmapServer(
   url: string,
   givenInit: ServerFetchInit = {},
+  trusted: boolean | undefined,
+): Promise<Response> {
+  const authHeader = new Headers(givenInit.headers).get('authorization');
+  if (authHeader && (await isStoredCredentialRefused(authHeader))) return refusedCredentialResponse();
+  // With tracing on, Stalwart gets the trace context and its spans join ours.
+  const response = await observeUpstream('stalwart', (trace) => fetchUnbudgeted(url, withTraceHeaders(givenInit, trace), trusted));
+  // Not awaited: this process's copy is updated at once, the shared write follows.
+  if (authHeader) {
+    void recordStoredCredentialStatus(authHeader, response.status).catch((error) => {
+      logger.warn('Stored credential status not recorded', { error: error instanceof Error ? error.message : 'Unknown error' });
+    });
+  }
+  return response;
+}
+
+function withTraceHeaders(init: ServerFetchInit, trace: Record<string, string>): ServerFetchInit {
+  if (Object.keys(trace).length === 0) return init;
+  const headers = new Headers(init.headers);
+  for (const [name, value] of Object.entries(trace)) headers.set(name, value);
+  return { ...init, headers };
+}
+
+async function fetchUnbudgeted(
+  url: string,
+  givenInit: ServerFetchInit,
   trusted: boolean | undefined,
 ): Promise<Response> {
   // Every call gets a deadline: a slow or silent server (with custom

@@ -18,8 +18,11 @@ import { AdminButtonLink } from '@/components/admin/button-link';
 import { AdminList, AdminListRow } from '@/components/admin/list';
 import { Badge } from '@/components/admin/badge';
 import { EmptyState } from '@/components/admin/empty-state';
-import { Flash, useFlash } from '@/components/admin/flash-message';
+import { useAdminFeedback } from '@/components/admin/feedback';
 import { ConfigNote, inputClass } from '@/components/admin/config-items';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog';
+import { ChangelogBadges, ChangelogEntries, anyFlag, type ChangelogEntry, type ChangelogFlags } from '@/components/admin/changelog';
 
 const CURRENT_APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || '0.0.0';
 
@@ -41,7 +44,10 @@ interface InstalledEntry {
 
 interface UpdatesResult {
   installed: InstalledEntry[];
-  updates: Array<{ slug: string; currentVersion: string; version: string; channel: 'stable' | 'beta'; changelog: string | null }>;
+  updates: Array<{
+    slug: string; currentVersion: string; version: string; channel: 'stable' | 'beta'; publishedAt: string | null;
+    changelog: string | null; notes?: ChangelogFlags; changelogs?: ChangelogEntry[];
+  }>;
   yanked: Array<{ slug: string; version: string; reason: string | null; at: string }>;
   deprecated: Array<{ slug: string; message: string | null; replacement: string | null }>;
   suspended: string[];
@@ -68,6 +74,16 @@ const PAGE = adminPageDef('marketplace');
 export const detailHref = (slug: string, version?: string | null) =>
   `${adminPath('marketplace', slug)}${version ? `?version=${encodeURIComponent(version)}` : ''}`;
 
+/**
+ * The notes an update brings: every version between the installed one and
+ * the offered one, or, from a directory older than 2026-10-30, the offered
+ * version's alone.
+ */
+function updateNotes(u: UpdatesResult['updates'][number]): ChangelogEntry[] {
+  if (u.changelogs?.length) return u.changelogs;
+  return [{ version: u.version, publishedAt: u.publishedAt ?? null, changelog: u.changelog, notes: u.notes }];
+}
+
 /** The segmented Browse / Installed and All / Plugins / Themes switches. */
 const pillGroupClass = 'flex items-center gap-0.5 rounded-md bg-muted p-0.5 self-start';
 const pillClass = (active: boolean) => cn(
@@ -78,12 +94,19 @@ const pillClass = (active: boolean) => cn(
 /**
  * Installs one version of an extension. A version the publisher withdrew,
  * or one older than the installed version, comes back as 409; the admin is
- * asked, and the install is repeated with `force` if they insist. Returns
- * the error text to show, or null.
+ * asked (in the page's ConfirmDialog), and the install is repeated with
+ * `force` if they insist. Returns the error text to show, or null.
  */
+export interface InstallQuestion {
+  title: string;
+  message: string;
+  confirmText: string;
+  cancelText: string;
+}
+
 export async function installVersion(
   body: { slug: string; version: string; type: 'plugin' | 'theme' },
-  confirm: (message: string) => boolean = (m) => window.confirm(m),
+  confirm: (question: InstallQuestion) => boolean | Promise<boolean>,
 ): Promise<{ ok: true; warnings: string[]; signature: string | null; updated: boolean } | { ok: false; error: string }> {
   const send = (force: boolean) => apiFetch('/api/admin/marketplace', {
     method: 'POST',
@@ -95,10 +118,14 @@ export async function installVersion(
     if (res.status === 409) {
       const data = await res.json().catch(() => ({}));
       if (data.yanked) {
-        if (!confirm(`${data.error}\n\nInstall it anyway?`)) return { ok: false, error: 'Not installed.' };
+        if (!(await confirm({ title: 'Install it anyway?', message: data.error, confirmText: 'Install', cancelText: 'Cancel' }))) {
+          return { ok: false, error: 'Not installed.' };
+        }
         res = await send(true);
       } else if (data.downgrade) {
-        if (!confirm(`${data.error}\n\nInstall the older version anyway?`)) return { ok: false, error: 'Not installed.' };
+        if (!(await confirm({ title: 'Install the older version anyway?', message: data.error, confirmText: 'Install', cancelText: 'Cancel' }))) {
+          return { ok: false, error: 'Not installed.' };
+        }
         res = await send(true);
       } else {
         return { ok: false, error: data.error || 'Installation failed' };
@@ -113,6 +140,7 @@ export async function installVersion(
 }
 
 export function MarketplacePage() {
+  const { dialogProps: confirmProps, confirm } = useConfirmDialog();
   const [extensions, setExtensions] = useState<MarketplaceListing[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -125,7 +153,7 @@ export function MarketplacePage() {
   const [directoryUrl, setDirectoryUrl] = useState<string | null>(null);
   const [channel, setChannel] = useState<'stable' | 'beta'>('stable');
   const [installing, setInstalling] = useState<Set<string>>(new Set());
-  const [message, setMessage] = useFlash();
+  const setMessage = useAdminFeedback();
   const [error, setError] = useState<string | null>(null);
   const [updates, setUpdates] = useState<UpdatesResult | null>(null);
   const [updatesLoading, setUpdatesLoading] = useState(true);
@@ -194,7 +222,7 @@ export function MarketplacePage() {
   async function install(ext: { slug: string; name: string; type: 'plugin' | 'theme' }, version: string, isUpdate: boolean) {
     markInstalling(ext.slug, true);
     setMessage(null);
-    const result = await installVersion({ slug: ext.slug, version, type: ext.type });
+    const result = await installVersion({ slug: ext.slug, version, type: ext.type }, confirm);
     markInstalling(ext.slug, false);
     if (!result.ok) {
       setMessage({ type: 'error', text: result.error });
@@ -256,7 +284,7 @@ export function MarketplacePage() {
         )}
       />
 
-      <Flash message={message} onDismiss={() => setMessage(null)} />
+      <ConfirmDialog {...confirmProps} />
 
       <div className="space-y-10">
         {updates && noticeCount > 0 && (
@@ -423,28 +451,44 @@ function UpdatesSection({
             </div>
           )}
           <ul className="divide-y divide-border rounded-lg border border-border">
-            {updates.updates.map((u) => (
-              <li key={u.slug} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="min-w-0 text-sm">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <AdminLink href={detailHref(u.slug, u.version)} className="font-medium text-foreground hover:underline">{name(u.slug)}</AdminLink>
-                    <span className="text-muted-foreground">v{u.currentVersion} → v{u.version}</span>
-                    {u.channel === 'beta' && <Badge tone="info">beta</Badge>}
+            {updates.updates.map((u) => {
+              const entries = updateNotes(u);
+              const withNotes = entries.filter((e) => e.changelog);
+              return (
+                <li key={u.slug} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0 flex-1 text-sm">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <AdminLink href={detailHref(u.slug, u.version)} className="font-medium text-foreground hover:underline">{name(u.slug)}</AdminLink>
+                      <span className="text-muted-foreground">v{u.currentVersion} → v{u.version}</span>
+                      {u.channel === 'beta' && <Badge tone="info">beta</Badge>}
+                      <ChangelogBadges flags={{ security: anyFlag(entries, 'security'), breaking: anyFlag(entries, 'breaking') }} />
+                    </div>
+                    {withNotes.length > 0 ? (
+                      <details className="mt-1" data-testid={`update-notes-${u.slug}`}>
+                        <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
+                          {entries.length > 1 ? `What's new in ${entries.length} versions` : "What's new"}
+                        </summary>
+                        <div className="mt-2 max-h-80 overflow-y-auto pe-2">
+                          <ChangelogEntries entries={entries} />
+                        </div>
+                      </details>
+                    ) : (
+                      <p className="mt-0.5 text-xs text-muted-foreground">No changelog for this update.</p>
+                    )}
                   </div>
-                  {u.changelog && <p className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-xs text-muted-foreground">{u.changelog}</p>}
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 shrink-0 gap-1.5 self-start text-xs"
-                  onClick={() => onUpdate(u)}
-                  disabled={installing.has(u.slug)}
-                >
-                  {installing.has(u.slug) ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowUpCircle className="h-3 w-3" />}
-                  Update
-                </Button>
-              </li>
-            ))}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 shrink-0 gap-1.5 self-start text-xs"
+                    onClick={() => onUpdate(u)}
+                    disabled={installing.has(u.slug)}
+                  >
+                    {installing.has(u.slug) ? <Loader2 className="h-3 w-3 animate-spin" /> : <ArrowUpCircle className="h-3 w-3" />}
+                    Update
+                  </Button>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -625,7 +669,7 @@ function ExtensionCard({
           />
         </AdminLink>
       )}
-      <AdminLink href={previewHref} className="block p-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 rounded-lg">
+      <AdminLink href={previewHref} className="block p-4 focus:outline-hidden rounded-lg">
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-md bg-muted flex items-center justify-center shrink-0 overflow-hidden">
             {extension.iconUrl ? (

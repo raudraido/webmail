@@ -5,7 +5,7 @@ import { useTranslations } from 'next-intl';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useEffectiveMailLayout } from '@/hooks/use-effective-mail-layout';
 import { useMediaQuery } from '@/hooks/use-media-query';
-import type { ArchiveMode, HoverAction, SwipeAction } from '@/stores/settings-store';
+import type { ArchiveMode, HoverAction, MvInboxType, SwipeAction } from '@/stores/settings-store';
 import { ALL_HOVER_ACTIONS } from '@/stores/settings-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { useEmailStore } from '@/stores/email-store';
@@ -13,6 +13,7 @@ import { useFaviconRefreshStore } from '@/stores/favicon-refresh-store';
 import { toast } from '@/stores/toast-store';
 import { cn } from '@/lib/utils';
 import { IS_LITE } from '@/lib/lite';
+import { useNoThirdPartyTraffic } from '@/hooks/use-third-party-mode';
 import { SettingsSection, SettingItem, Select, ToggleSwitch } from './settings-section';
 import { MessageListOrderSettings } from './message-list-order-settings';
 import { Button } from '@/components/ui/button';
@@ -20,6 +21,7 @@ import { AlertTriangle, FolderSync, Loader2, RefreshCw } from '@/components/icon
 import { usePolicyStore } from '@/stores/policy-store';
 import { allowEmailMove, createMailboxWithHooks, emitEmailMove } from '@/lib/plugin-mail-hooks';
 import type { Mailbox } from '@/lib/jmap/types';
+import type { SearchDefaultScope } from '@/lib/search-default-scope';
 
 /**
  * The Message list page: what the list shows, who the senders look like,
@@ -28,6 +30,8 @@ import type { Mailbox } from '@/lib/jmap/types';
  */
 export function MessageListSettings() {
   const t = useTranslations('settings.email_behavior');
+  // Sender icons come from an outside service: no setting for them in the mode (#903).
+  const faviconsAllowed = !useNoThirdPartyTraffic();
   const tPage = useTranslations('settings.message_list');
   const tAppearance = useTranslations('settings.appearance');
   const tAdvanced = useTranslations('settings.advanced');
@@ -57,6 +61,7 @@ export function MessageListSettings() {
     swipeRightAction,
     swipeLeftAction,
     clearSearchOnFolderChange,
+    searchDefaultScope,
     showPreview,
     showVerificationCodes,
     disableThreading,
@@ -68,6 +73,7 @@ export function MessageListSettings() {
     listColumns,
     mailLayout,
     interfaceLayout,
+    mvInboxType,
     tintListRowsByTag,
     senderFavicons,
     showAvatarsInJunk,
@@ -177,6 +183,25 @@ export function MessageListSettings() {
         </SettingItem>
         )}
 
+        {/* Gmail's inbox types; "Unread first" puts the newest unread mail in a section above the rest. */}
+        {mountainView && (
+        <SettingItem label={t('inbox_type.label')} description={t('inbox_type.description')}>
+          <Select
+            value={mvInboxType}
+            onChange={(value) => {
+              updateSetting('mvInboxType', value as MvInboxType);
+              const client = useAuthStore.getState().client;
+              const store = useEmailStore.getState();
+              if (client && store.selectedMailbox) void store.fetchEmails(client, store.selectedMailbox, { background: true });
+            }}
+            options={[
+              { value: 'default', label: t('inbox_type.default') },
+              { value: 'unread-first', label: t('inbox_type.unread_first') },
+            ]}
+          />
+        </SettingItem>
+        )}
+
         <MessageListOrderSettings />
 
         <SettingItem label={tAppearance('tint_list_rows.label')} description={tAppearance('tint_list_rows.description')}>
@@ -196,13 +221,13 @@ export function MessageListSettings() {
 
       {/* Sender favicons come from the /api/favicon proxy, absent in the static Lite build (components/ui/avatar.tsx). */}
       <SettingsSection id="senders" title={tPage('sections.senders')}>
-        {!IS_LITE && (
+        {!IS_LITE && faviconsAllowed && (
           <SettingItem label={tAdvanced('sender_favicons.label')} description={tAdvanced('sender_favicons.description')}>
             <ToggleSwitch checked={senderFavicons} onChange={(checked) => updateSetting('senderFavicons', checked)} />
           </SettingItem>
         )}
 
-        {!IS_LITE && senderFavicons && (
+        {!IS_LITE && faviconsAllowed && senderFavicons && (
           <SettingItem nested label={tAdvanced('sender_favicons.refresh_label')} description={tAdvanced('sender_favicons.refresh_description')}>
             <Button
               variant="outline"
@@ -392,6 +417,19 @@ export function MessageListSettings() {
               { value: '25', label: t('emails_per_page.25') },
               { value: '50', label: t('emails_per_page.50') },
               { value: '100', label: t('emails_per_page.100') },
+            ]}
+          />
+        </SettingItem>
+        )}
+
+        {!isSettingHidden('searchDefaultScope') && (
+        <SettingItem label={t('search_default_scope.label')} description={t('search_default_scope.description')} locked={isSettingLocked('searchDefaultScope')} advanced>
+          <Select
+            value={searchDefaultScope}
+            onChange={(value) => updateSetting('searchDefaultScope', value as SearchDefaultScope)}
+            options={[
+              { value: 'all', label: t('search_default_scope.all') },
+              { value: 'folder', label: t('search_default_scope.folder') },
             ]}
           />
         </SettingItem>

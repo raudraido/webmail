@@ -4,8 +4,15 @@ import type { IJMAPClient } from '@/lib/jmap/client-interface';
 import { debug } from '@/lib/debug';
 import { taskHooks } from '@/lib/plugin-hooks';
 import { taskToView } from '@/lib/plugin-projection';
+import { applyPatchObject, patchedProperties } from '@/lib/jmap/patch-object';
 
 export type TaskViewFilter = 'all' | 'pending' | 'completed' | 'overdue';
+
+/**
+ * The `error` a failed task load leaves. The tasks loaded before stay; the
+ * task list shows a notice for it.
+ */
+export const TASKS_LOAD_ERROR = 'Failed to fetch tasks';
 
 interface TaskStore {
   tasks: CalendarTask[];
@@ -22,11 +29,20 @@ interface TaskStore {
   /** Resolves to null when a plugin stopped the create. */
   createTask: (client: IJMAPClient, task: Partial<CalendarTask>) => Promise<CalendarTask | null>;
   /** false when a plugin stopped it (the plugin tells the user why). */
-  updateTask: (client: IJMAPClient, id: string, updates: Partial<CalendarTask>) => Promise<boolean>;
+  /**
+   * `updates` may name members by path (`alerts/<id>/acknowledged`). `base`
+   * is the task as the caller read it, for a task the list does not hold
+   * or holds in an older state.
+   */
+  updateTask: (client: IJMAPClient, id: string, updates: Partial<CalendarTask>, base?: CalendarTask) => Promise<boolean>;
   deleteTask: (client: IJMAPClient, id: string) => Promise<boolean>;
   toggleTaskComplete: (client: IJMAPClient, task: CalendarTask) => Promise<void>;
   clearTasks: () => void;
 }
+
+// Each fetch gets a number: only the latest one's answer is kept, so an
+// answer that comes late never puts an older list back.
+let latestFetch = 0;
 
 export const useTaskStore = create<TaskStore>((set, get) => ({
   tasks: [],
@@ -50,9 +66,13 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
   fetchTasks: async (client, calendarIds) => {
     debug.log('tasks', 'TaskStore/fetchTasks start', { calendarIds: calendarIds || 'all' });
+    const fetch = ++latestFetch;
+    const stillCurrent = () => fetch === latestFetch;
     set({ isLoading: true, error: null });
     try {
       const tasks = await client.getCalendarTasks(calendarIds);
+      // A fetch started later decides the list.
+      if (!stillCurrent()) return;
       debug.log('tasks', 'TaskStore/fetchTasks received', tasks.length, 'tasks');
       tasks.forEach((t, i) => {
         debug.log('tasks', `TaskStore/fetchTasks [${i}]`, {
@@ -65,7 +85,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       if (taskHooks.onTasksLoaded.size > 0) void taskHooks.onTasksLoaded.emit(tasks.map(taskToView));
     } catch (error) {
       debug.error('TaskStore/fetchTasks failed', error);
-      set({ isLoading: false, error: 'Failed to fetch tasks' });
+      if (stillCurrent()) set({ isLoading: false, error: TASKS_LOAD_ERROR });
     }
   },
 
@@ -79,9 +99,12 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     return created;
   },
 
-  updateTask: async (client, id, updates) => {
-    if (!(await taskHooks.onBeforeTaskUpdate.intercept({ taskId: id, patch: updates }))) return false;
-    const before = get().tasks.find(t => t.id === id);
+  updateTask: async (client, id, updates, base) => {
+    const before = base ?? get().tasks.find(t => t.id === id);
+    // `updates` may name members by path (`alerts/<id>/acknowledged`);
+    // plugins read the patch as whole properties.
+    const patch = patchedProperties(before ?? { id }, updates);
+    if (!(await taskHooks.onBeforeTaskUpdate.intercept({ taskId: id, patch }))) return false;
     const newId = await client.updateCalendarTask(id, updates);
     if (newId && newId !== id) {
       // Moved into a calendar of another account: the server recreated it
@@ -89,11 +112,15 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       set({ selectedTaskId: get().selectedTaskId === id ? newId : get().selectedTaskId });
       await get().fetchTasks(client);
       const moved = get().tasks.find(t => t.id === newId)
-        ?? ({ ...before, ...updates, id: newId } as CalendarTask);
+        ?? ({ ...applyPatchObject(before ?? {}, updates), id: newId } as CalendarTask);
       void taskHooks.onTaskUpdate.emit(taskToView(moved));
       return true;
     }
-    const updated = { ...(before ?? { id }), ...updates, updated: new Date().toISOString() } as CalendarTask;
+    // Applied to the task the caller read, else as the store holds it now:
+    // another update may have finished meanwhile (two alerts acknowledged
+    // at once).
+    const current = base ?? get().tasks.find(t => t.id === id) ?? { id };
+    const updated = { ...applyPatchObject(current, updates), updated: new Date().toISOString() } as CalendarTask;
     set({
       tasks: get().tasks.map(t => t.id === id ? updated : t),
     });
@@ -127,5 +154,8 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     void taskHooks.onTaskToggleComplete.emit({ taskId: task.id, complete: newProgress === 'completed' });
   },
 
-  clearTasks: () => set({ tasks: [], selectedTaskId: null, error: null }),
+  clearTasks: () => {
+    latestFetch += 1;
+    set({ tasks: [], selectedTaskId: null, error: null, isLoading: false });
+  },
 }));

@@ -8,6 +8,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { usePolicyStore } from '@/stores/policy-store';
 import { SettingsSection, SettingItem, Select, ToggleSwitch } from './settings-section';
 import { TemplateSettings } from './template-settings';
+import { ProofreadingSettings } from './proofreading-settings';
 import { Button } from '@/components/ui/button';
 import { X, ChevronRight } from '@/components/icons';
 
@@ -20,9 +21,12 @@ export function ComposingSettings() {
   const t = useTranslations('settings.email_behavior');
   const tPage = useTranslations('settings.composing_page');
   const templatesEnabled = usePolicyStore((s) => s.isFeatureEnabled('templatesEnabled'));
+  // The admin panel can lock or hide these three (restriction-keys.ts).
+  const { isSettingLocked, isSettingHidden } = usePolicyStore();
   const [newKeyword, setNewKeyword] = useState('');
 
   const {
+    quickReplyEnabled,
     autoSelectReplyIdentity,
     replyIdentityMatch,
     plainTextMode,
@@ -30,10 +34,13 @@ export function ComposingSettings() {
     attachmentReminderEnabled,
     attachmentReminderKeywords,
     emptySubjectWarningEnabled,
+    placeholderWarningEnabled,
     recipientMentionsEnabled,
     mentionAddsRecipientTo,
     sendDelaySeconds,
     signaturePosition,
+    signatureNewMailEnabled,
+    signatureReplyForwardEnabled,
     signatureSeparatorEnabled,
     requestReadReceiptDefault,
     readReceiptResponse,
@@ -47,12 +54,14 @@ export function ComposingSettings() {
   return (
     <div className="space-y-8">
       <SettingsSection id="editor" title={tPage('title')} description={tPage('description')}>
-        <SettingItem label={t('plain_text_mode.label')} description={t('plain_text_mode.description')}>
+        {!isSettingHidden('plainTextMode') && (
+        <SettingItem label={t('plain_text_mode.label')} description={t('plain_text_mode.description')} locked={isSettingLocked('plainTextMode')}>
           <ToggleSwitch
             checked={plainTextMode}
             onChange={(checked) => updateSetting('plainTextMode', checked)}
           />
         </SettingItem>
+        )}
 
         <SettingItem label={t('recipient_mentions.label')} description={t('recipient_mentions.description')}>
           <ToggleSwitch
@@ -83,16 +92,27 @@ export function ComposingSettings() {
         </SettingItem>
       </SettingsSection>
 
+      <ProofreadingSettings />
+
       <SettingsSection id="replying" title={tPage('sections.replying')}>
-        <SettingItem label={t('auto_select_reply_identity.label')} description={t('auto_select_reply_identity.description')}>
+        <SettingItem label={t('quick_reply.label')} description={t('quick_reply.description')}>
+          <ToggleSwitch
+            checked={quickReplyEnabled}
+            onChange={(checked) => updateSetting('quickReplyEnabled', checked)}
+          />
+        </SettingItem>
+
+        {!isSettingHidden('autoSelectReplyIdentity') && (
+        <SettingItem label={t('auto_select_reply_identity.label')} description={t('auto_select_reply_identity.description')} locked={isSettingLocked('autoSelectReplyIdentity')}>
           <ToggleSwitch
             checked={autoSelectReplyIdentity}
             onChange={(checked) => updateSetting('autoSelectReplyIdentity', checked)}
           />
         </SettingItem>
+        )}
 
-        {autoSelectReplyIdentity && customFromEnabled && (
-          <SettingItem nested label={t('reply_identity_match.label')} description={t('reply_identity_match.description')}>
+        {autoSelectReplyIdentity && customFromEnabled && !isSettingHidden('replyIdentityMatch') && (
+          <SettingItem nested label={t('reply_identity_match.label')} description={t('reply_identity_match.description')} locked={isSettingLocked('replyIdentityMatch')}>
             <Select
               value={replyIdentityMatch}
               onChange={(value) => updateSetting('replyIdentityMatch', value as ReplyIdentityMatch)}
@@ -112,6 +132,20 @@ export function ComposingSettings() {
               { value: 'above_quote', label: t('signature_position.above_quote') },
               { value: 'below_quote', label: t('signature_position.below_quote') },
             ]}
+          />
+        </SettingItem>
+
+        <SettingItem label={t('signature_new_mail.label')} description={t('signature_new_mail.description')}>
+          <ToggleSwitch
+            checked={signatureNewMailEnabled}
+            onChange={(checked) => updateSetting('signatureNewMailEnabled', checked)}
+          />
+        </SettingItem>
+
+        <SettingItem label={t('signature_reply_forward.label')} description={t('signature_reply_forward.description')}>
+          <ToggleSwitch
+            checked={signatureReplyForwardEnabled}
+            onChange={(checked) => updateSetting('signatureReplyForwardEnabled', checked)}
           />
         </SettingItem>
 
@@ -181,11 +215,12 @@ export function ComposingSettings() {
               }}
             >
               <input
+                aria-label={t('attachment_reminder.add_placeholder')}
                 type="text"
                 value={newKeyword}
                 onChange={(e) => setNewKeyword(e.target.value)}
                 placeholder={t('attachment_reminder.add_placeholder')}
-                className="flex-1 min-w-0 px-2 py-1 text-sm bg-background border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+                className="flex-1 min-w-0 px-2 py-1 text-sm bg-background border border-border rounded-md focus:outline-hidden"
               />
               <button
                 type="submit"
@@ -202,6 +237,13 @@ export function ComposingSettings() {
           <ToggleSwitch
             checked={emptySubjectWarningEnabled}
             onChange={(checked) => updateSetting('emptySubjectWarningEnabled', checked)}
+          />
+        </SettingItem>
+
+        <SettingItem label={t('placeholder_warning.label')} description={t('placeholder_warning.description')}>
+          <ToggleSwitch
+            checked={placeholderWarningEnabled}
+            onChange={(checked) => updateSetting('placeholderWarningEnabled', checked)}
           />
         </SettingItem>
       </SettingsSection>

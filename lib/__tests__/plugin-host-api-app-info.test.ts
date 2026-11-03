@@ -70,6 +70,22 @@ describe('api.app.searchSettings', () => {
     expect(again.some((r) => r.pageId === 'vacation')).toBe(true);
   });
 
+  it('returns texts with the configured name, never the raw placeholder (#1314)', async () => {
+    await setUp();
+    const results = await dispatchApiCall(plugin(), 'app.searchSettings', ['Rath Mail email links']) as { pageId: string; description?: string }[];
+    expect(results.some((r) => r.pageId === 'general' && r.description?.includes('Rath Mail'))).toBe(true);
+    expect(JSON.stringify(results)).not.toContain('{appName}');
+  });
+
+  it('says Bulwark when the config can not be read', async () => {
+    await setUp();
+    fetchConfig.mockRejectedValueOnce(new Error('offline'));
+    const results = await dispatchApiCall(plugin(), 'app.searchSettings', ['bulwark email links']) as { pageId: string; description?: string }[];
+    expect(fetchConfig).toHaveBeenCalledTimes(1);
+    expect(results.some((r) => r.pageId === 'general' && r.description?.includes('Bulwark'))).toBe(true);
+    expect(JSON.stringify(results)).not.toContain('{appName}');
+  });
+
   it('wants a query', async () => {
     await expect(dispatchApiCall(plugin(), 'app.searchSettings', [''])).rejects.toThrow(/non-empty string/);
   });
@@ -85,5 +101,23 @@ describe('api.app.getSettings', () => {
     expect(settings).not.toHaveProperty('trustedSenders');
     expect(settings).not.toHaveProperty('pushRelayUrl');
     expect(JSON.stringify(settings)).not.toContain('boss@example.org');
+  });
+
+  it('shares every setting a plugin may change, so it knows the value it would replace', async () => {
+    const { SETTINGS_SCHEMA } = await import('@/lib/settings-schema');
+    const { SHARED_SETTINGS } = await import('../plugin-sandbox/host-api-app');
+    const { useSettingsStore } = await import('@/stores/settings-store');
+    const { useCalendarStore } = await import('@/stores/calendar-store');
+    const shared = new Set<string>(SHARED_SETTINGS);
+    const missing = Object.values(SETTINGS_SCHEMA).filter((e) => e.store === 'settings' && !shared.has(e.key)).map((e) => e.key);
+    expect(missing).toEqual([]);
+
+    useSettingsStore.getState().resetToDefaults();
+    useCalendarStore.setState({ viewMode: 'week' });
+    const settings = await dispatchApiCall(plugin(['settings:read']), 'app.getSettings', []) as Record<string, unknown>;
+    expect(settings.calendarView).toBe('week');
+    // The reminder words come through whole (29 by default), or a proposal
+    // built on them would drop the rest.
+    expect(settings.attachmentReminderKeywords).toEqual(useSettingsStore.getState().attachmentReminderKeywords);
   });
 });

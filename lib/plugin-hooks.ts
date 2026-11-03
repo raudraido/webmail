@@ -1,6 +1,7 @@
 // Plugin Hook Bus - event bus system for plugin lifecycle hooks
 
 import type { CalendarEventFormView, Disposable } from './plugin-types';
+import { rowBadgeHandlersChanged } from './plugin-sandbox/row-badges';
 
 // ─── Error Tracker (Circuit Breaker) ─────────────────────────
 
@@ -130,6 +131,16 @@ function withTimeout<T>(pluginId: string, promise: T | Promise<T>, ms: number = 
  */
 export type TakeOverOutcome = 'default' | 'handled' | 'aborted' | 'failed';
 
+/**
+ * The plugins whose `takeOver` handler runs right now (onComposeSend): a raw
+ * send from one of them completes the composer's send (offline outbox, #523).
+ */
+const runningTakeOvers = new Map<string, number>();
+
+export function pluginRunsTakeOver(pluginId: string): boolean {
+  return (runningTakeOvers.get(pluginId) ?? 0) > 0;
+}
+
 /** A handler returns `{ abort: true }` to stop a `takeOver` operation. */
 export function isAbortResult(value: unknown): value is { abort: true } {
   return typeof value === 'object' && value !== null && (value as { abort?: unknown }).abort === true;
@@ -158,35 +169,50 @@ export class HookBus<T extends (...args: any[]) => any> {
    * @param opts.failClosed For intercepts guarding an action that can't be
    *   taken back (sending mail): a handler that throws or runs out of time
    *   cancels the action instead of letting it through.
+   * @param opts.onChange Called when handlers come or go, for UI that asked
+   *   the bus before a plugin started (row badges).
+   * @param opts.interceptTimeoutMs For intercepts nobody waits on a user for
+   *   (a reminder about to be shown): the per-handler budget of `intercept`
+   *   instead of the long one for confirmation dialogs.
    */
   constructor(
     private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
-    private readonly opts: { failClosed?: boolean } = {},
+    private readonly opts: { failClosed?: boolean; onChange?: () => void; interceptTimeoutMs?: number } = {},
   ) {}
+
+  private setHandlers(next: HookEntry<T>[]): void {
+    const changed = next.length !== this.handlers.length;
+    this.handlers = next;
+    if (changed) this.opts.onChange?.();
+  }
 
   register(pluginId: string, handler: T, order: number = 100): Disposable {
     const entry: HookEntry<T> = { pluginId, handler, order };
-    this.handlers.push(entry);
-    this.handlers.sort((a, b) => a.order - b.order);
+    this.setHandlers([...this.handlers, entry].sort((a, b) => a.order - b.order));
     return {
       dispose: () => {
-        this.handlers = this.handlers.filter(h => h !== entry);
+        this.setHandlers(this.handlers.filter(h => h !== entry));
       },
     };
   }
 
   /** Remove all handlers for a given plugin */
   removePlugin(pluginId: string): void {
-    this.handlers = this.handlers.filter(h => h.pluginId !== pluginId);
+    this.setHandlers(this.handlers.filter(h => h.pluginId !== pluginId));
   }
 
   /** Remove all handlers */
   clear(): void {
-    this.handlers = [];
+    this.setHandlers([]);
   }
 
   get size(): number {
     return this.handlers.length;
+  }
+
+  /** Whether a plugin other than `pluginId` has a handler here. */
+  hasHandlersBesides(pluginId: string | undefined): boolean {
+    return this.handlers.some((h) => h.pluginId !== pluginId);
   }
 
   /** Fire all handlers (observer pattern - no return values used) */
@@ -239,7 +265,8 @@ export class HookBus<T extends (...args: any[]) => any> {
     for (const { pluginId, handler } of this.handlers) {
       if (pluginErrorTracker.isDisabled(pluginId)) continue;
       try {
-        const result = await withTimeout(pluginId, handler(...args), Math.max(this.timeoutMs, INTERCEPT_TIMEOUT_MS));
+        const budget = this.opts.interceptTimeoutMs ?? Math.max(this.timeoutMs, INTERCEPT_TIMEOUT_MS);
+        const result = await withTimeout(pluginId, handler(...args), budget);
         if (result === false) return 'vetoed';
       } catch (err) {
         pluginErrorTracker.record(pluginId, err);
@@ -259,11 +286,16 @@ export class HookBus<T extends (...args: any[]) => any> {
     for (const { pluginId, handler } of this.handlers) {
       if (pluginErrorTracker.isDisabled(pluginId)) continue;
       let result: unknown;
+      runningTakeOvers.set(pluginId, (runningTakeOvers.get(pluginId) ?? 0) + 1);
       try {
         result = await withTimeout(pluginId, handler(...args), Math.max(this.timeoutMs, INTERCEPT_TIMEOUT_MS));
       } catch (err) {
         pluginErrorTracker.record(pluginId, err);
         return 'failed';
+      } finally {
+        const left = (runningTakeOvers.get(pluginId) ?? 1) - 1;
+        if (left > 0) runningTakeOvers.set(pluginId, left);
+        else runningTakeOvers.delete(pluginId);
       }
       if (result === false) return 'handled';
       if (isAbortResult(result)) return 'aborted';
@@ -277,16 +309,18 @@ export class HookBus<T extends (...args: any[]) => any> {
    * with the intercept budget; `accept` turns a return value into the next
    * value, or returns undefined to ignore it. A handler that throws or runs
    * out of time is skipped (fail open), and counts as a failure like any
-   * other hook error.
+   * other hook error. `skipPluginId` leaves one plugin's handlers out (a
+   * plugin opening a link itself isn't asked about it again).
    */
   async interceptWithValue<V>(
     initial: V,
     accept: (result: unknown, current: V) => V | undefined,
-    opts: { timeoutMs?: number } = {},
+    opts: { timeoutMs?: number; skipPluginId?: string } = {},
   ): Promise<{ allowed: false } | { allowed: true; value: V }> {
     const budget = opts.timeoutMs ?? Math.max(this.timeoutMs, INTERCEPT_TIMEOUT_MS);
     let value = initial;
     for (const { pluginId, handler } of this.handlers) {
+      if (pluginId === opts.skipPluginId) continue;
       if (pluginErrorTracker.isDisabled(pluginId)) continue;
       let result: unknown;
       try {
@@ -301,6 +335,30 @@ export class HookBus<T extends (...args: any[]) => any> {
       if (next !== undefined) value = next;
     }
     return { allowed: true, value };
+  }
+
+  /**
+   * Ask every handler at once, each with the same initial value, and keep
+   * each answer with the plugin that gave it, for hooks whose results the
+   * host shows per plugin (onProvideSearchResults): the plugins asked, in
+   * their order, each with its answer to come, so the host can show one as
+   * soon as it comes and knows who it still waits for. A handler that throws
+   * or runs out of time answers null.
+   */
+  collect<V>(initial: V, ...rest: unknown[]): { pluginId: string; answer: Promise<{ value: unknown } | null> }[] {
+    const asked = this.handlers.filter(({ pluginId }) => !pluginErrorTracker.isDisabled(pluginId));
+    return asked.map(({ pluginId, handler }) => ({
+      pluginId,
+      answer: (async () => {
+        try {
+          const value: unknown = await withTimeout(pluginId, handler(initial, ...rest), this.timeoutMs);
+          return { value };
+        } catch (err) {
+          pluginErrorTracker.record(pluginId, err);
+          return null;
+        }
+      })(),
+    }));
   }
 
   /** Fire handlers as transforms - each receives the output of the previous */
@@ -464,9 +522,10 @@ export const emailHooks = {
   // renderer for an attachment. Initial value: AttachmentPreview, second
   // argument: AttachmentInfo.
   onAttachmentPreview: new HookBus(),
-  // Transform hook - lets plugins contribute additional results to the global
-  // search panel. Initial value: ExternalSearchResult[]. Second argument:
-  // { query: string, filters: SearchFilters }.
+  // Lets plugins contribute results from elsewhere to a search, drawn above
+  // its message list (lib/plugin-search-results.ts). Each handler is asked
+  // on its own with an empty ExternalSearchResult[] and { query, filters },
+  // so a click can go back to the plugin that gave the entry.
   onProvideSearchResults: new HookBus(),
   // Observer fired (debounced) when the composer draft body, subject, or
   // recipients change. Handler receives a DraftView snapshot. Use for AI
@@ -519,6 +578,12 @@ export const calendarHooks = {
   onCalendarChange: new HookBus(),
   onCalendarVisibilityToggle: new HookBus(),
   onICalSubscriptionChange: new HookBus(),
+  // Intercept hook - fires before Bulwark shows a reminder (an event's or a
+  // task's display alert), in every open tab. Return false to show it
+  // yourself: no toast, no sound and no title alert for that reminder.
+  // Fails open within the default budget, so a hung plugin delays a
+  // reminder by seconds, never drops it.
+  onBeforeCalendarAlert: new HookBus(DEFAULT_TIMEOUT_MS, { interceptTimeoutMs: DEFAULT_TIMEOUT_MS }),
   onCalendarAlert: new HookBus(),
   onCalendarAlertAcknowledge: new HookBus(),
   // Transform hook - fires when the event form is open and start/end change.
@@ -704,10 +769,11 @@ export const uiHooks = {
   onDeviceTypeChange: new HookBus(),
   onColumnResize: new HookBus(),
   onMobileBack: new HookBus(),
-  // Intercept hook - fires when the user clicks an external link inside the
-  // app (typically inside an email body iframe). Handler receives
-  // ExternalLinkContext; return false to cancel the navigation. Mutate
-  // `href` in place to rewrite (e.g. strip UTM params, route via a proxy).
+  // Intercept hook - fires when the user opens an outside link anywhere in
+  // the app (message bodies, the reader view, events, contacts,
+  // notifications, unsubscribe links, other plugins' ui.openExternalUrl;
+  // lib/plugin-hook-result.ts). Handler receives ExternalLinkContext; return
+  // false to cancel the navigation or { href } to send it elsewhere.
   onBeforeExternalLink: new HookBus(),
   // Observer (debounced) fired when the user changes the active text
   // selection inside an app surface. Receives SelectionContext.
@@ -812,7 +878,8 @@ export const renderHooks = {
   // Second argument: { emailId: string; email: EmailReadView }
   // Handlers return a new (or extended) badges array.
   // Rendered by the email list row component next to the subject line.
-  onEmailListItemRender: new HookBus(),
+  // Rows drawn before a plugin started ask again once its handler is there.
+  onEmailListItemRender: new HookBus(undefined, { onChange: rowBadgeHandlersChanged }),
   // Transform hook - runs when an email is opened, BEFORE the viewer computes
   // the body it will render. Initial value: RenderableBody { html, text,
   // attachments, handledBy? }. Second argument: MessageContext { id,

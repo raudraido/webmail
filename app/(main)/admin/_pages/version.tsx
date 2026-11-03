@@ -12,8 +12,9 @@ import {
 import { SettingsSection, SettingItem } from '@/components/settings/settings-section';
 import { Button } from '@/components/ui/button';
 import { AdminPageHeader } from '@/components/admin/page-header';
+import { AdminBodySkeleton } from '@/components/boot-skeleton/admin-skeleton';
 import { Badge, type BadgeTone } from '@/components/admin/badge';
-import { Flash, useFlash } from '@/components/admin/flash-message';
+import { useAdminFeedback } from '@/components/admin/feedback';
 import { adminPageDef } from '@/lib/admin/admin-nav';
 import { apiFetch } from '@/lib/browser-navigation';
 import type { UpdateStatus, UpdateSeverity } from '@/lib/version-check/types';
@@ -24,6 +25,7 @@ interface VersionAdminStatus {
   endpoint: string;
   defaultEndpoint: string;
   disabledByEnv: boolean;
+  disabledByNoThirdPartyTraffic?: boolean;
   lastCheckedAt: string | null;
   lastSuccessAt: string | null;
   nextScheduledAt: string | null;
@@ -64,7 +66,7 @@ export function VersionPage() {
   const [data, setData] = useState<VersionAdminStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
-  const [message, setMessage] = useFlash();
+  const setMessage = useAdminFeedback();
 
   async function refresh(): Promise<void> {
     setLoading(true);
@@ -116,9 +118,7 @@ export function VersionPage() {
     return (
       <div>
         {header}
-        <div className="flex items-center justify-center py-10 text-sm text-muted-foreground">
-          <Loader2 className="me-2 h-4 w-4 animate-spin" /> Loading
-        </div>
+        <AdminBodySkeleton status="Loading" />
       </div>
     );
   }
@@ -133,7 +133,6 @@ export function VersionPage() {
     <div>
       {header}
 
-      <Flash message={message} onDismiss={() => setMessage(null)} />
 
       <div className="space-y-10">
         <SettingsSection id="status" title="Status">
@@ -206,6 +205,11 @@ export function VersionPage() {
               {data.disabledByEnv ? 'Yes' : 'No'}
             </span>
           </SettingItem>
+          {data.disabledByNoThirdPartyTraffic && (
+            <SettingItem label="Off: no third-party traffic" description="NO_THIRD_PARTY_TRAFFIC is on, so this server never asks the version endpoint. See Organisation > Security.">
+              <span className="text-sm font-medium text-amber-600 dark:text-amber-400">Yes</span>
+            </SettingItem>
+          )}
         </SettingsSection>
       </div>
     </div>

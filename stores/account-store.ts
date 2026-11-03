@@ -43,6 +43,12 @@ export interface AccountEntry {
   avatarColor: string;
   /** Timestamp of last successful login */
   lastLoginAt: number;
+  /**
+   * When the user last signed in to it with a password, token or provider
+   * login (not a restore). The organisation's maximum session length counts
+   * from here. `undefined` = signed in before this was recorded.
+   */
+  signedInAt?: number;
   /** Whether this account is currently connected */
   isConnected: boolean;
   /** Whether this account had a connection error */
@@ -55,6 +61,11 @@ export interface AccountEntry {
    * device yet. Kept across reloads, and opening it leads to the sign-in form.
    */
   awaitingSignIn?: boolean;
+  /**
+   * Opened by an admin through an impersonation handoff rather than by the
+   * mailbox owner. The server says so each time the session is restored.
+   */
+  impersonated?: boolean;
 }
 
 interface AccountState {

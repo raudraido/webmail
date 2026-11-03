@@ -123,6 +123,8 @@ vi.mock('@/stores/settings-store', () => {
     // The default position: replies/forwards get the signature appended at
     // send time rather than embedded above the quote.
     signaturePosition: 'below_quote',
+    signatureNewMailEnabled: true,
+    signatureReplyForwardEnabled: true,
     signatureSeparatorEnabled: true,
     requestReadReceiptDefault: false,
     addTrustedSender: () => {},
@@ -304,6 +306,33 @@ describe('reply signature above the quote (#842)', () => {
       expect(html).toContain('<i>Sales team</i>');
       expect(html.indexOf('<i>Sales team</i>')).toBeLessThan(html.indexOf('reply_line'));
     });
+
+    // #1503: with the delimiter on, a reply started with the "-- " line, so
+    // there was no line above the signature to type the reply into.
+    it('leaves an empty line above the delimiter', () => {
+      useSettingsStore.setState({ signaturePosition: 'above_quote' });
+      setIdentities([ME]);
+      render(<EmailComposer mode="reply" replyTo={TO_ME} />);
+
+      const html = screen.getByTestId('rich-text-editor').getAttribute('data-html')!;
+      expect(html.startsWith('<p></p><p data-signature-block="separator">-- </p>')).toBe(true);
+    });
+
+    it('leaves an empty line above a delimiter that arrives with late identities', async () => {
+      useSettingsStore.setState({ signaturePosition: 'above_quote' });
+      setIdentities([]);
+      const props = { mode: 'reply' as const, replyTo: TO_ME };
+      const { rerender } = render(<EmailComposer {...props} />);
+      setIdentities([ME]);
+      rerender(<EmailComposer {...props} />);
+
+      await waitFor(() => expect(editorState.html).toContain('<b>Alice</b>'));
+      const lines = new DOMParser().parseFromString(editorState.html, 'text/html').body.children;
+      expect(lines[0].tagName).toBe('P');
+      expect(lines[0].textContent).toBe('');
+      expect(lines[0].hasAttribute('data-signature-block')).toBe(false);
+      expect(lines[1].getAttribute('data-signature-block')).toBe('separator');
+    });
   });
 
   it('still signs a reply below the quote at send time by default', async () => {
@@ -314,5 +343,39 @@ describe('reply signature above the quote (#842)', () => {
     const sent = await send(onSend);
     expect(sent.htmlBody).toMatch(/Original text[\s\S]*<i>Sales team<\/i>$/);
     expect(sent.body).toMatch(/Original text[\s\S]*Sales team$/);
+  });
+});
+
+
+describe('reply quote attribution markers', () => {
+  afterEach(() => {
+    useSettingsStore.setState({ plainTextMode: false, signaturePosition: 'below_quote' });
+  });
+
+  it.each(['reply', 'replyAll'] as const)('marks the HTML original in %s mode', (mode) => {
+    render(<EmailComposer mode={mode} replyTo={TO_ME} />);
+    const html = screen.getByTestId('rich-text-editor').getAttribute('data-html')!;
+    expect(html).toContain('data-reply-quote-start="true"');
+    expect(html).toContain('Original text');
+  });
+
+  it('marks the attribution of a plain-text original composed in rich-text mode', () => {
+    render(<EmailComposer mode="reply" replyTo={{ ...TO_ME, htmlBody: undefined }} />);
+    const html = screen.getByTestId('rich-text-editor').getAttribute('data-html')!;
+    expect(html).toContain('data-reply-quote-start="true"');
+    expect(html).toContain('<blockquote');
+  });
+
+  it('leaves forwarding attribution unmarked', () => {
+    render(<EmailComposer mode="forward" replyTo={TO_ME} />);
+    const html = screen.getByTestId('rich-text-editor').getAttribute('data-html')!;
+    expect(html).not.toContain('data-reply-quote-start');
+    expect(html).toContain('Original text');
+  });
+
+  it('preserves a simple plugin attribution', () => {
+    render(<EmailComposer mode="reply" replyTo={{ ...TO_ME, quoteHeaderHtml: '<p><b>From:</b> Bob</p>', quoteWrapInBlockquote: false }} />);
+    const html = screen.getByTestId('rich-text-editor').getAttribute('data-html')!;
+    expect(html).toContain('<p data-reply-quote-start="true"><b>From:</b> Bob</p>');
   });
 });

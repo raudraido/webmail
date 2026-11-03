@@ -10,6 +10,7 @@ export function createConfig(overrides: Partial<ConfigData> = {}): ConfigData {
     oauthClientId: '',
     oauthIssuerUrl: '',
     oauthScopes: '',
+    oauthResource: '',
     rememberMeEnabled: false,
     settingsSyncEnabled: false,
     stalwartFeaturesEnabled: true,
@@ -24,6 +25,7 @@ export function createConfig(overrides: Partial<ConfigData> = {}): ConfigData {
     loginImprintUrl: '',
     loginPrivacyPolicyUrl: '',
     loginWebsiteUrl: '',
+    loginUsernamePlaceholder: '',
     loginLogoMaxHeight: '',
     loginLogoMaxWidth: '',
     loginShowHeading: true,
@@ -40,6 +42,12 @@ export function createConfig(overrides: Partial<ConfigData> = {}): ConfigData {
     embeddedMode: false,
     parentOrigin: '',
     sourceCodeUrl: '',
+    accessibilityStatementUrl: '',
+    accessibilityFeedbackUrl: '',
+    helpUrl: '',
+    easyReadUrl: '',
+    signLanguageUrl: '',
+    noThirdPartyTraffic: false,
     ...overrides,
   };
 }

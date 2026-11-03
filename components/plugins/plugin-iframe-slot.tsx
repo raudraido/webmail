@@ -25,6 +25,13 @@ interface Props {
   extraProps?: Record<string, unknown>;
   /** The frame fills its panel and scrolls inside, instead of growing with its content. */
   fill?: boolean;
+  /**
+   * Told whether the frame is up: false when the plugin's shouldShow says no
+   * or its frame fails to start, true once it has started. For a slot that
+   * stands in for a part of Bulwark (calendar-task-view), so the caller can
+   * draw its own part again.
+   */
+  onShownChange?: (shown: boolean) => void;
 }
 
 interface FloatingDropdownState {
@@ -38,9 +45,11 @@ interface FloatingDropdownState {
   ariaLabel?: string;
 }
 
-export function PluginIframeSlot({ pluginId, slot, extraProps, fill = false }: Props) {
+export function PluginIframeSlot({ pluginId, slot, extraProps, fill = false, onShownChange }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<SandboxInstance | null>(null);
+  const onShownChangeRef = useRef(onShownChange);
+  useEffect(() => { onShownChangeRef.current = onShownChange; }, [onShownChange]);
   const [height, setHeight] = useState<number>(0);
   const [width, setWidth] = useState<number | undefined>(undefined);
   const [floatingDropdown, setFloatingDropdown] = useState<FloatingDropdownState | null>(null);
@@ -48,13 +57,22 @@ export function PluginIframeSlot({ pluginId, slot, extraProps, fill = false }: P
   // null = pending, true/false = decided
   const [show, setShow] = useState<boolean | null>(null);
 
+  // A caller that builds its props inline hands over a new object on every
+  // render; each one used to cost a shouldShow round trip to the plugin and a
+  // props-update for the frame. Keep the last object while its values are
+  // the same ones.
+  const [stableProps, setStableProps] = useState(extraProps);
+  const sameValues = shallowEqual(stableProps, extraProps);
+  if (!sameValues) setStableProps(extraProps);
+  const currentProps = sameValues ? stableProps : extraProps;
+
   // What the plugin may see of the surface the slot sits on. Everything the
   // plugin receives (shouldShow context, mount props, updates) goes through
   // this, so a ui:* permission never hands over mail, events or contacts.
   const props = useMemo(() => {
     const active = getActivePlugin(pluginId);
-    return active ? slotPropsFor(active.plugin, slot, extraProps ?? {}) : {};
-  }, [pluginId, slot, extraProps]);
+    return active ? slotPropsFor(active.plugin, slot, currentProps ?? {}) : {};
+  }, [pluginId, slot, currentProps]);
 
   // Decide whether to mount based on the plugin's shouldShow (background-side).
   useEffect(() => {
@@ -70,6 +88,10 @@ export function PluginIframeSlot({ pluginId, slot, extraProps, fill = false }: P
       .catch(() => { if (!cancelled) setShow(false); });
     return () => { cancelled = true; };
   }, [pluginId, slot, props]);
+
+  useEffect(() => {
+    if (show === false) onShownChangeRef.current?.(false);
+  }, [show]);
 
   // Spawn / tear down the slot iframe.
   useEffect(() => {
@@ -121,7 +143,17 @@ export function PluginIframeSlot({ pluginId, slot, extraProps, fill = false }: P
       },
     });
     instanceRef.current = inst;
+    // A frame that fails to start stays blank; say so to a caller that can
+    // draw something in its place.
+    let live = true;
+    if (onShownChangeRef.current) {
+      inst.initPromise.then(
+        () => { if (live) onShownChangeRef.current?.(true); },
+        () => { if (live) onShownChangeRef.current?.(false); },
+      );
+    }
     return () => {
+      live = false;
       try { inst.destroy(); } catch { /* ignore */ }
       instanceRef.current = null;
       setFloatingDropdown(null);
@@ -190,6 +222,14 @@ export function PluginIframeSlot({ pluginId, slot, extraProps, fill = false }: P
       )}
     </>
   );
+}
+
+function shallowEqual(a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((k) => Object.prototype.hasOwnProperty.call(b, k) && Object.is(a[k], b[k]));
 }
 
 function FloatingDropdownPortal({

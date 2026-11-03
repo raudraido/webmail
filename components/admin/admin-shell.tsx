@@ -1,60 +1,26 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
-import {
-  ArrowLeft,
-  ArrowUpCircle,
-  Activity,
-  ChevronRight,
-  KeyRound,
-  LayoutDashboard,
-  LogOut,
-  Palette,
-  Puzzle,
-  Scale,
-  ScrollText,
-  Search,
-  Server,
-  Shield,
-  Store,
-  SwatchBook,
-  X,
-  type AppIcon,
-} from '@/components/icons';
+import { useTranslations } from 'next-intl';
+import { ArrowLeft, ChevronRight, KeyRound, LogOut, Search, Shield, X } from '@/components/icons';
 import { Input } from '@/components/ui/input';
 import { NavigationRail } from '@/components/layout/navigation-rail';
 import { AboutFooter } from '@/components/settings/about-data-settings';
 import { scrollToSettingsSection } from '@/components/settings/settings-section';
 import { useIsDesktop } from '@/hooks/use-media-query';
+import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useAdminLocation, navigateAdmin } from '@/hooks/use-admin-navigation';
 import { useUpdateStore, selectHasUpdate } from '@/stores/update-store';
 import { useAdminUnsavedStore } from '@/stores/admin-unsaved-store';
 import { apiFetch, getPathPrefix } from '@/lib/browser-navigation';
 import { ADMIN_PAGES, adminPath, type AdminPageDef, type AdminPageId, type AdminSectionDef } from '@/lib/admin/admin-nav';
+import { AdminSessionLinksSkeleton, AdminSkeleton } from '@/components/boot-skeleton/admin-skeleton';
+import { useSkeletonLabels } from '@/components/boot-skeleton/use-skeleton-labels';
+import { ADMIN_GROUPS, ADMIN_GROUP_LABELS, ADMIN_PAGE_ICONS as PAGE_ICONS } from './admin-page-icons';
 import { cn } from '@/lib/utils';
 import { AdminLink } from './admin-link';
 import { AdminShellContext } from './shell-context';
-
-const PAGE_ICONS: Record<AdminPageId, AppIcon> = {
-  dashboard: LayoutDashboard,
-  settings: Server,
-  auth: Shield,
-  branding: Palette,
-  policy: Scale,
-  plugins: Puzzle,
-  themes: SwatchBook,
-  marketplace: Store,
-  version: ArrowUpCircle,
-  telemetry: Activity,
-  logs: ScrollText,
-};
-
-const GROUP_LABELS: Record<AdminPageDef['group'], string | null> = {
-  top: null,
-  extensions: 'Extensions',
-  system: 'System',
-};
 
 interface AdminShellProps {
   /** Whether the admin session is in place; the sidebar counts load then. */
@@ -71,6 +37,8 @@ interface Match {
   sections: AdminSectionDef[];
 }
 
+const subscribeNothing = () => () => {};
+
 /**
  * The admin panel's frame: the webmail's own navigation rail, the page list
  * laid out like the settings sidebar (search included), the content column
@@ -78,8 +46,16 @@ interface Match {
  */
 export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly, onLogout, children }: AdminShellProps) {
   const pathname = usePathname();
+  const tShell = useTranslations('shell');
+  const tSettings = useTranslations('settings');
+  const tSidebar = useTranslations('sidebar');
   const location = useAdminLocation();
+  const { label: loadingLabel, labels: railLabels } = useSkeletonLabels();
   const isDesktop = useIsDesktop();
+  // The server can't know the window width, so its HTML would be the phone
+  // layout, shown on desktop until hydration swaps it (the rail's Admin link
+  // is a full page load).
+  const hydrated = useSyncExternalStore(subscribeNothing, () => true, () => false);
   const requestLeave = useAdminUnsavedStore((s) => s.requestLeave);
   const [query, setQuery] = useState('');
   const [saveBarHost, setSaveBarHost] = useState<HTMLElement | null>(null);
@@ -90,6 +66,10 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
   const onChangePassword = pathname === '/admin/change-password';
   const activePage: AdminPageId | null = location.page ?? (isDesktop && !onChangePassword ? 'dashboard' : null);
   const activeDef = location.page ? ADMIN_PAGES.find((p) => p.id === location.page) ?? null : null;
+  // "<Page> - Admin - <app>", so the tab and the window list say which
+  // admin page is open (WCAG 2.4.2).
+  const pageName = onChangePassword ? 'Change password' : ADMIN_PAGES.find((p) => p.id === activePage)?.label;
+  useDocumentTitle(pageName ? `${pageName} - ${tSidebar('admin')}` : tSidebar('admin'), { showAccount: false });
 
   // Match the navigation rail: red for security/deprecated, amber for normal.
   const hasUpdate = useUpdateStore(selectHasUpdate);
@@ -150,8 +130,8 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
   }, [trimmed]);
 
   const groups = useMemo(() => (
-    (['top', 'extensions', 'system'] as const)
-      .map((group) => ({ group, label: GROUP_LABELS[group], items: matches.filter((m) => m.page.group === group) }))
+    ADMIN_GROUPS
+      .map((group) => ({ group, label: ADMIN_GROUP_LABELS[group], items: matches.filter((m) => m.page.group === group) }))
       .filter((g) => g.items.length > 0)
   ), [matches]);
 
@@ -169,16 +149,22 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
   const badgeFor = (id: AdminPageId): ReactNode => {
     if (id === 'plugins' && pendingApprovals > 0) {
       return (
-        <span className="ms-auto inline-flex min-w-[18px] items-center justify-center rounded-full bg-amber-500 px-1.5 text-[10px] font-semibold leading-[18px] text-white" title={`${pendingApprovals} plugin${pendingApprovals === 1 ? '' : 's'} waiting for approval`}>
+        <span className="ms-auto inline-flex min-w-[18px] items-center justify-center rounded-full bg-amber-500 px-1.5 text-[0.625rem] font-semibold leading-[1.125rem] text-white" title={`${pendingApprovals} plugin${pendingApprovals === 1 ? '' : 's'} waiting for approval`}>
           {pendingApprovals}
         </span>
       );
     }
     if (id === 'version' && hasUpdate) {
+      // A dot only: role="img" makes screen readers announce its label, which
+      // they skip on a plain span; the title shows it on hover.
+      // The same words as the dot on the rail's Settings entry.
+      const label = tShell(updateImportant ? 'update_important' : 'update_available');
       return (
         <span
+          role="img"
+          aria-label={label}
+          title={label}
           className={cn('ms-auto h-2 w-2 rounded-full', updateImportant ? 'bg-red-500' : 'bg-amber-500')}
-          aria-label={updateImportant ? 'Important update available' : 'Update available'}
         />
       );
     }
@@ -192,8 +178,8 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
         type="search"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search admin"
-        aria-label="Search admin pages"
+        placeholder={tShell('admin_search')}
+        aria-label={tShell('admin_search')}
         className={cn('h-9 ps-9 [&::-webkit-search-cancel-button]:appearance-none [&::-webkit-search-decoration]:appearance-none', query && 'pe-8')}
       />
       {query && (
@@ -201,7 +187,7 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
           type="button"
           onClick={() => setQuery('')}
           className="absolute end-2 top-1/2 -translate-y-1/2 rounded-full p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          aria-label="Clear search"
+          aria-label={tSettings('search_clear')}
         >
           <X className="h-4 w-4" />
         </button>
@@ -217,6 +203,8 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
   // not of their mailbox, so these stay with the panel rather than the rail.
   // A Stalwart admin signed in automatically has neither a password to change
   // nor a session worth ending, since opening the panel signs them back in.
+  // Which kind of admin this is is known once the session check is done.
+  const showSessionLinks = authenticated && !isStalwartAutoLogin;
   const sessionLinks = (mobile: boolean) => (
     <>
       <AdminLink
@@ -255,6 +243,20 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
     </div>
   );
 
+  // The server HTML and the hydration pass: the panel's skeleton, both
+  // layouts drawn and picked by CSS until the width is known.
+  if (!hydrated) {
+    return (
+      <AdminSkeleton
+        page={location.page}
+        label={loadingLabel}
+        backLabel={tSettings('back_to_mail')}
+        searchLabel={tShell('admin_search')}
+        labels={railLabels}
+      />
+    );
+  }
+
   if (!isDesktop) {
     const showIndex = location.page === null && !onChangePassword;
     const title = onChangePassword ? 'Change password' : activeDef?.label ?? 'Admin';
@@ -267,7 +269,8 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
               <a
                 href={`${prefix}/`}
                 className="flex h-10 w-10 items-center justify-center rounded-md text-foreground transition-colors hover:bg-muted"
-                aria-label="Back to mail"
+                aria-label={tSettings('back_to_mail')}
+                title={tSettings('back_to_mail')}
               >
                 <ArrowLeft className="h-5 w-5" />
               </a>
@@ -275,7 +278,7 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
               <AdminLink
                 href={backHref}
                 className="flex h-10 w-10 items-center justify-center rounded-md text-foreground transition-colors hover:bg-muted"
-                aria-label="Back"
+                aria-label={tShell('back')}
               >
                 <ArrowLeft className="h-5 w-5" />
               </AdminLink>
@@ -297,7 +300,7 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
                       {groupIndex > 0 && <div className="mx-5 my-2 border-t border-border" />}
                       {group.label && (
                         <div className="px-5 pb-1.5 pt-3">
-                          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{group.label}</span>
+                          <span className="text-xs font-semibold text-muted-foreground">{group.label}</span>
                         </div>
                       )}
                       {group.items.map(({ page, sections }) => {
@@ -333,7 +336,11 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
                     </div>
                   ))}
                 </div>
-                {!isStalwartAutoLogin && <div className="border-t border-border px-2 py-2">{sessionLinks(true)}</div>}
+                {(showSessionLinks || !authenticated) && (
+                  <div className="border-t border-border px-2 py-2">
+                    {showSessionLinks ? sessionLinks(true) : <AdminSessionLinksSkeleton mobile />}
+                  </div>
+                )}
                 <div className="border-t border-border px-2 py-2"><AboutFooter /></div>
               </>
             ) : (
@@ -369,21 +376,21 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
                 className="flex h-9 w-full items-center rounded-md px-3 text-sm font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
               >
                 <ArrowLeft className="me-2 h-4 w-4" />
-                Back to Mail
+                {tSettings('back_to_mail')}
               </a>
             </div>
           </div>
 
           <div className="flex-1 overflow-y-auto py-2">
             <div className="px-3 pb-1 pt-1">{searchBox}</div>
-            <nav className="space-y-0.5 px-2" aria-label="Admin pages">
+            <nav className="space-y-0.5 px-2" aria-label={tShell('admin_pages')}>
               {groups.length === 0 && noResults}
               {groups.map((group, groupIndex) => (
                 <div key={group.group}>
                   {groupIndex > 0 && <div className="mx-1 my-2 border-t border-border" />}
                   {group.label && (
                     <div className="px-3 pb-1 pt-2.5">
-                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{group.label}</span>
+                      <span className="text-[0.6875rem] font-semibold text-muted-foreground">{group.label}</span>
                     </div>
                   )}
                   {group.items.map(({ page, sections }) => {
@@ -424,7 +431,12 @@ export function AdminShell({ authenticated, isStalwartAutoLogin, configReadOnly,
           </div>
 
           <div className="border-t border-border px-1 py-1">
-            {!isStalwartAutoLogin && <div className="space-y-0.5 px-1 py-1">{sessionLinks(false)}</div>}
+            {/* Held in place while the session is checked, as the boot skeleton draws them. */}
+            {(showSessionLinks || !authenticated) && (
+              <div className="space-y-0.5 px-1 py-1">
+                {showSessionLinks ? sessionLinks(false) : <AdminSessionLinksSkeleton mobile={false} />}
+              </div>
+            )}
             <AboutFooter />
           </div>
         </aside>

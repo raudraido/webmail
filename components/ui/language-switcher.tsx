@@ -30,9 +30,11 @@ const languages = [
   { value: 'pl', label: 'Polski' },
   { value: 'pt', label: 'Português' },
   { value: 'ro', label: 'Română' },
+  { value: 'th', label: 'ไทย' },
   { value: 'tr', label: 'Türkçe' },
   { value: 'ru', label: 'Русский' },
   { value: 'uk', label: 'Українська' },
+  { value: 'vi', label: 'Tiếng Việt' },
   { value: 'ko', label: '한국어' },
   { value: 'ja', label: '日本語' },
   { value: 'mn', label: 'Монгол' },
@@ -172,7 +174,7 @@ export function LanguageSwitcher({ className, iconOnly = false }: { className?: 
         ref={buttonRef}
         onClick={toggle}
         className={cn(
-          "flex items-center gap-2 rounded-md bg-muted border border-border text-foreground hover:border-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-colors duration-150 cursor-pointer",
+          "flex items-center gap-2 rounded-md bg-muted border border-border text-foreground hover:border-muted-foreground focus:outline-hidden transition-colors duration-150 cursor-pointer",
           iconOnly ? "justify-center w-9 h-9" : "px-3 py-1.5 text-sm w-full"
         )}
         aria-haspopup="listbox"

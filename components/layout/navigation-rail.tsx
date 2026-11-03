@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Mail, CalendarEvent, Users, Folder, Settings, Keyboard, Plus, Shield, LogOut, Check, Search, Puzzle } from "@/components/icons";
+import { Mail, CalendarEvent, Users, Folder, Settings, Keyboard, Plus, Shield, LogOut, Check, Search, Puzzle, Accessibility } from "@/components/icons";
+import { openAccessibilityPanel } from "@/components/accessibility/accessibility-quick-panel";
 import { AccountSwitcher } from "./account-switcher";
 import { iconForName } from "@/components/icons";
 import { useConfig } from "@/hooks/use-config";
@@ -27,10 +28,13 @@ import { PluginSlot } from "@/components/plugins/plugin-slot";
 import { useStalwartAdmin } from "@/hooks/use-stalwart-admin";
 import { KeyboardShortcutsModal } from "@/components/keyboard-shortcuts-modal";
 import { getPathPrefix, withBasePath } from "@/lib/browser-navigation";
+import { interceptLeave } from "@/lib/leave-guard";
 import { Avatar } from "@/components/ui/avatar";
 import { toUnicodeEmail } from "@/lib/idn";
 import { usePluginPages, pluginPageHref, isPluginPageActive } from "@/hooks/use-plugin-pages";
 import { NotificationBell } from "@/components/notifications/notification-center";
+import { useBottomControls } from "@/hooks/use-bottom-controls";
+import { writeRailHints, type RailHint } from "@/lib/boot-skeleton/hints";
 
 interface NavItem {
   id: string;
@@ -119,8 +123,17 @@ function StorageQuotaCircle({ quota, usagePercent }: { quota: StorageQuota; usag
       ) return;
       setOpen(false);
     };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      buttonRef.current?.focus();
+    };
     document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
   }, [open]);
 
   // Usage can legitimately exceed the quota (e.g. limit lowered after the fact)
@@ -139,6 +152,7 @@ function StorageQuotaCircle({ quota, usagePercent }: { quota: StorageQuota; usag
         onClick={() => setOpen(!open)}
         className="relative w-8 h-8 flex items-center justify-center rounded-full hover:bg-muted transition-colors cursor-pointer"
         aria-label={t("storage")}
+        aria-expanded={open}
       >
         <svg className="w-8 h-8 -rotate-90" viewBox="0 0 32 32">
           <circle cx="16" cy="16" r="12" fill="none" className="stroke-muted" strokeWidth="3" />
@@ -150,7 +164,7 @@ function StorageQuotaCircle({ quota, usagePercent }: { quota: StorageQuota; usag
             style={{ transition: "stroke-dasharray 0.3s" }}
           />
         </svg>
-        <span className="absolute text-[7px] font-bold text-muted-foreground tabular-nums">
+        <span className="absolute text-[0.4375rem] font-bold text-muted-foreground tabular-nums">
           {Math.round(usagePercent)}%
         </span>
       </button>
@@ -185,7 +199,7 @@ function StorageQuotaCircle({ quota, usagePercent }: { quota: StorageQuota; usag
               style={{ width: `${usagePercent}%` }}
             />
           </div>
-          <p className="text-[10px] text-muted-foreground mt-1 tabular-nums">
+          <p className="text-[0.625rem] text-muted-foreground mt-1 tabular-nums">
             {Math.round(usagePercent)}% {t("storage_used").toLowerCase()}
           </p>
         </div>,
@@ -213,6 +227,8 @@ export function NavigationRail({
 }: NavigationRailProps) {
   const t = useTranslations("sidebar");
   const tGlobalSearch = useTranslations("global_search");
+  // The phone tab bar: toasts sit above it.
+  const tabBarRef = useBottomControls(orientation === "horizontal");
   const pathname = usePathname();
   const router = useRouter();
   const { appLogoLightUrl, appLogoDarkUrl } = useConfig();
@@ -223,6 +239,8 @@ export function NavigationRail({
   const supportsFiles = client?.supportsFiles() ?? false;
   const supportsContacts = client?.supportsContacts() ?? false;
   const showRailAccountList = useSettingsStore((s) => s.showRailAccountList);
+  const showAccessibilityButton = useSettingsStore((s) => s.showAccessibilityButton);
+  const simpleMode = useSettingsStore((s) => s.simpleMode);
   const mountainView = useSettingsStore((s) => s.interfaceLayout === 'mountain-view');
   const sidebarAppsEnabled = usePolicyStore((s) => s.isFeatureEnabled('sidebarAppsEnabled'));
   const filesEnabled = usePolicyStore((s) => s.isFeatureEnabled('filesEnabled'));
@@ -240,6 +258,16 @@ export function NavigationRail({
   const startUpdatePolling = useUpdateStore((s) => s.startPolling);
   useEffect(() => { startUpdatePolling(); }, [startUpdatePolling]);
   const updateImportant = updateSeverity === 'security' || updateSeverity === 'deprecated';
+  const tShell = useTranslations("shell");
+  // Settings > Accessibility: the unread count as a number, as a dot, or not
+  // at all. A dot keeps the count in the link's name; hidden drops it too.
+  const unreadCountStyle = useSettingsStore((s) => s.unreadCountStyle);
+  const badgeShown = (item: NavItem) => item.badge != null && item.badge > 0 && unreadCountStyle !== 'hidden';
+  // "Mail, 3 unread": the badge itself is hidden from screen readers.
+  const itemName = (item: NavItem) =>
+    badgeShown(item) ? tShell("name_unread", { name: t(item.labelKey), count: item.badge ?? 0 }) : t(item.labelKey);
+  // Said with the admin entry; its dot alone is not announced.
+  const updateLabel = hasUpdate ? tShell(updateImportant ? "update_important" : "update_available") : null;
 
   // Account list for rail
   const accounts = useAccountStore((s) => s.accounts);
@@ -321,6 +349,23 @@ export function NavigationRail({
 
   const visibleItems = navItems.filter((item) => !item.hidden);
 
+  // Leave the next page load's skeleton a note of what this rail shows
+  // (lib/boot-skeleton/hints.ts). Only once a session is up: before that the
+  // rail is still missing the apps the server offers.
+  const quotaShown = !!quota && quota.total > 0;
+  useEffect(() => {
+    if (!client) return;
+    const items: RailHint[] = [];
+    for (const item of navItems) if (item.id !== 'mail' && !item.hidden) items.push(item.id as RailHint);
+    if (sidebarAppsEnabled && onManageApps) items.push('add-app');
+    if (isStalwartAdmin) items.push('admin');
+    if (showAccessibilityButton) items.push('a11y');
+    if (quotaShown) items.push('quota');
+    writeRailHints(items);
+    // navItems is rebuilt every render; its inputs are listed instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, supportsCalendar, calendarEnabled, supportsContacts, contactsEnabled, supportsFiles, filesEnabled, sidebarAppsEnabled, !!onManageApps, isStalwartAdmin, showAccessibilityButton, quotaShown]);
+
   const getIsActive = (href: string, itemId: string) => {
     if (activeAppId) return false;
     if (onNavigate) {
@@ -335,6 +380,7 @@ export function NavigationRail({
 
   const handleNavClick = (itemId: 'mail' | 'calendar' | 'contacts' | 'files' | 'settings') =>
     (e: React.MouseEvent) => {
+      if (interceptLeave(e)) return;
       if (onNavigate) {
         const intercepted = onNavigate(itemId);
         if (intercepted !== false) {
@@ -350,6 +396,7 @@ export function NavigationRail({
   if (orientation === "horizontal") {
     return (
       <nav
+        ref={tabBarRef}
         data-mobile-navigation=""
         className={cn(
           "flex items-center bg-background border-t border-border shrink-0 overflow-x-auto mobile-scroll-hidden pb-[calc(env(safe-area-inset-bottom)/2)]",
@@ -367,6 +414,7 @@ export function NavigationRail({
               key={item.id}
               href={item.href}
               onClick={handleNavClick(item.id as 'mail' | 'calendar' | 'contacts' | 'files' | 'settings')}
+              data-tour={`nav-${item.id}`}
               className={cn(
                 "flex flex-col items-center justify-center gap-1 py-2 px-1 min-h-[44px] grow shrink-0 basis-[64px]",
                 "transition-colors duration-150",
@@ -375,22 +423,25 @@ export function NavigationRail({
                   : "text-muted-foreground hover:text-foreground"
               )}
               aria-current={isActive ? "page" : undefined}
+              aria-label={itemName(item)}
             >
               <div className={cn(
                 "relative",
                 mountainView && isActive && "min-w-14 rounded-full bg-primary/15 px-4 py-[3px]"
               )}>
                 <Icon className="w-5 h-5" />
-                {item.badge != null && item.badge > 0 && (
-                  <span className="absolute -top-1.5 -right-2.5 flex items-center justify-center min-w-[16px] h-4 text-[10px] font-bold rounded-full bg-red-500 text-white px-1">
-                    {item.badge > 99 ? "99+" : item.badge}
+                {badgeShown(item) && (unreadCountStyle === 'dot' ? (
+                  <span aria-hidden="true" data-testid="rail-unread-dot" className="absolute -top-0.5 -end-1 w-2.5 h-2.5 rounded-full bg-red-500" />
+                ) : (
+                  <span aria-hidden="true" className="absolute -top-1.5 -end-2.5 flex items-center justify-center min-w-[16px] h-4 text-[0.625rem] font-bold rounded-full bg-red-600 text-white px-1">
+                    {item.badge! > 99 ? "99+" : item.badge}
                   </span>
-                )}
+                ))}
                 {isActive && !mountainView && (
                   <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-primary" />
                 )}
               </div>
-              <span className="text-[10px] font-medium leading-tight truncate max-w-full">{t(item.labelKey)}</span>
+              <span className="text-[0.625rem] font-medium leading-tight truncate max-w-full">{t(item.labelKey)}</span>
             </Link>
           );
         })}
@@ -403,7 +454,7 @@ export function NavigationRail({
             <Link
               key={`plugin-page:${page.pluginId}:${page.id}`}
               href={pluginPageHref(page)}
-              onClick={() => { if (activeAppId) onCloseInlineApp?.(); }}
+              onClick={(e) => { if (interceptLeave(e)) return; if (activeAppId) onCloseInlineApp?.(); }}
               data-plugin-page-link={`${page.pluginId}/${page.id}`}
               title={page.pluginName}
               className={cn(
@@ -424,7 +475,7 @@ export function NavigationRail({
                   <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-primary" />
                 )}
               </div>
-              <span className="text-[10px] font-medium leading-tight truncate max-w-full">{page.title}</span>
+              <span className="text-[0.625rem] font-medium leading-tight truncate max-w-full">{page.title}</span>
             </Link>
           );
         })}
@@ -459,7 +510,7 @@ export function NavigationRail({
                   <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-primary" />
                 )}
               </div>
-              <span className="text-[10px] font-medium leading-tight truncate max-w-full">{app.name}</span>
+              <span className="text-[0.625rem] font-medium leading-tight truncate max-w-full">{app.name}</span>
             </button>
           );
         })}
@@ -483,14 +534,15 @@ export function NavigationRail({
               {hasUpdate && (
                 <span
                   className={cn(
-                    "absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ring-2 ring-background",
+                    "absolute -top-0.5 -end-0.5 w-2 h-2 rounded-full ring-2 ring-background",
                     updateImportant ? "bg-red-500" : "bg-amber-500",
                   )}
-                  aria-label={updateImportant ? "Important update available" : "Update available"}
+                  aria-hidden="true"
                 />
               )}
             </span>
-            <span className="text-[10px] font-medium leading-tight truncate max-w-full">{t("admin") || "Admin"}</span>
+            <span className="text-[0.625rem] font-medium leading-tight truncate max-w-full">{t("admin") || "Admin"}</span>
+            {updateLabel && <span className="sr-only">{`, ${updateLabel}`}</span>}
           </a>
         )}
 
@@ -498,6 +550,7 @@ export function NavigationRail({
         <Link
           href="/settings"
           onClick={handleNavClick('settings')}
+          data-tour="nav-settings"
           className={cn(
             "flex flex-col items-center justify-center gap-1 py-2 px-1 min-h-[44px] grow shrink-0 basis-[64px]",
             "transition-colors duration-150",
@@ -513,7 +566,7 @@ export function NavigationRail({
               <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-primary" />
             )}
           </div>
-          <span className="text-[10px] font-medium leading-tight truncate max-w-full">{t("settings")}</span>
+          <span className="text-[0.625rem] font-medium leading-tight truncate max-w-full">{t("settings")}</span>
         </Link>
       </nav>
     );
@@ -588,19 +641,25 @@ export function NavigationRail({
                   : "text-muted-foreground hover:bg-muted hover:text-foreground"
               )}
               aria-current={isActive ? "page" : undefined}
+              aria-label={itemName(item)}
               title={collapsed ? t(item.labelKey) : undefined}
               style={collapsed ? undefined : { paddingBlock: 'var(--density-sidebar-py)' }}
             >
               <Icon className={cn("w-[18px] h-[18px] flex-shrink-0", isActive && "text-primary")} />
               {!collapsed && <span className="truncate">{t(item.labelKey)}</span>}
-              {item.badge != null && item.badge > 0 && (
-                <span className={cn(
-                  "absolute flex items-center justify-center min-w-[16px] h-4 text-[10px] font-bold rounded-full bg-red-500 text-white px-1",
-                  collapsed ? "-top-0.5 -right-0.5" : "right-1.5"
+              {badgeShown(item) && (unreadCountStyle === 'dot' ? (
+                <span aria-hidden="true" data-testid="rail-unread-dot" className={cn(
+                  "absolute w-2.5 h-2.5 rounded-full bg-red-500",
+                  collapsed ? "top-1 end-1" : "end-2.5"
+                )} />
+              ) : (
+                <span aria-hidden="true" className={cn(
+                  "absolute flex items-center justify-center min-w-[16px] h-4 text-[0.625rem] font-bold rounded-full bg-red-600 text-white px-1",
+                  collapsed ? "-top-0.5 -end-0.5" : "end-1.5"
                 )}>
-                  {item.badge > 99 ? "99+" : item.badge}
+                  {item.badge! > 99 ? "99+" : item.badge}
                 </span>
-              )}
+              ))}
             </Link>
           );
         })}
@@ -613,7 +672,7 @@ export function NavigationRail({
             <Link
               key={`plugin-page:${page.pluginId}:${page.id}`}
               href={pluginPageHref(page)}
-              onClick={() => { if (activeAppId) onCloseInlineApp?.(); }}
+              onClick={(e) => { if (interceptLeave(e)) return; if (activeAppId) onCloseInlineApp?.(); }}
               data-plugin-page-link={`${page.pluginId}/${page.id}`}
               className={cn(
                 "relative flex items-center gap-2.5 rounded-md transition-colors duration-150",
@@ -713,22 +772,37 @@ export function NavigationRail({
               adminActive ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-muted",
             )}
             title={t("admin") || "Admin"}
+            aria-label={updateLabel ? `${t("admin") || "Admin"}, ${updateLabel}` : undefined}
             aria-current={adminActive ? "page" : undefined}
           >
             <Shield className="w-[18px] h-[18px]" />
             {hasUpdate && (
               <span
                 className={cn(
-                  "absolute top-2 right-2 w-2 h-2 rounded-full ring-2 ring-background",
+                  "absolute top-2 end-2 w-2 h-2 rounded-full ring-2 ring-background",
                   updateImportant ? "bg-red-500" : "bg-amber-500",
                 )}
-                aria-label={updateImportant ? "Important update available" : "Update available"}
+                aria-hidden="true"
               />
             )}
           </a>
         )}
 
         <NotificationBell placement="side" className="w-10 h-10 rounded-md" />
+
+        {showAccessibilityButton && (
+          <button
+            type="button"
+            onClick={openAccessibilityPanel}
+            data-testid="rail-accessibility"
+            className="flex items-center justify-center w-10 h-10 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            title={t("accessibility")}
+            aria-label={t("accessibility")}
+            aria-keyshortcuts="Alt+Shift+A"
+          >
+            <Accessibility className="w-[18px] h-[18px]" />
+          </button>
+        )}
 
         <Link
           href="/settings"
@@ -781,7 +855,7 @@ export function NavigationRail({
           </div>
         )}
 
-        {onLogout && showRailAccountList && accounts.length > 0 && (
+        {onLogout && showRailAccountList && !simpleMode && accounts.length > 0 && (
           <>
             <div className="w-8 border-t my-1" style={{ borderColor: 'rgba(128, 128, 128, 0.3)' }} />
 
@@ -811,7 +885,7 @@ export function NavigationRail({
                     fallbackColor={account.avatarColor}
                   />
                   {isActive && (
-                    <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-primary flex items-center justify-center">
+                    <span className="absolute -bottom-0.5 -end-0.5 w-3 h-3 rounded-full bg-primary flex items-center justify-center">
                       <Check className="w-2 h-2 text-primary-foreground" />
                     </span>
                   )}
@@ -863,7 +937,7 @@ export function NavigationRail({
                 {accounts.length > 1 && (
                   <button
                     onClick={() => { setLogoutMenuOpen(false); logoutAll(); }}
-                    className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-destructive hover:bg-muted transition-colors"
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-start text-foreground hover:bg-muted transition-colors"
                     role="menuitem"
                   >
                     <LogOut className="w-4 h-4" />

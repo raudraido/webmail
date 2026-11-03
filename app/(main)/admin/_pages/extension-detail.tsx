@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import { Puzzle, SwatchBook, Loader2, Eye, EyeOff, Lock, RotateCcw, Trash2, Shield, ShieldAlert, Store, Upload } from '@/components/icons';
 import { apiFetch } from '@/lib/browser-navigation';
 import { adminPath } from '@/lib/admin/admin-nav';
@@ -15,11 +15,14 @@ import { AdminPageHeader } from '@/components/admin/page-header';
 import { AdminLink } from '@/components/admin/admin-link';
 import { AdminSaveBar } from '@/components/admin/save-bar';
 import { Badge } from '@/components/admin/badge';
-import { Flash, useFlash } from '@/components/admin/flash-message';
+import { useAdminFeedback } from '@/components/admin/feedback';
 import { inputClass } from '@/components/admin/config-items';
 import { ExtensionIcon } from '@/components/admin/extension-icon';
 import { cn } from '@/lib/utils';
 import { useExtensionIcons } from './use-extension-icons';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useConfirmDialog } from '@/hooks/use-confirm-dialog';
+import { ChangelogNotes } from '@/components/admin/changelog';
 
 export interface ConfigField {
   type: 'string' | 'secret' | 'boolean' | 'number' | 'select';
@@ -29,6 +32,8 @@ export interface ConfigField {
   default?: unknown;
   placeholder?: string;
   options?: { label: string; value: string }[];
+  /** A string that takes several lines (instructions, templates): a full-width text box. */
+  multiline?: boolean;
 }
 
 /** A plugin or theme as /api/admin/plugins and /api/admin/themes list it. */
@@ -50,6 +55,10 @@ export interface ExtensionEntry {
   source?: { kind: 'marketplace'; slug: string; directoryUrl: string } | { kind: 'upload' };
   /** Versions kept on this server for a rollback, most recently replaced first. */
   previousVersions?: string[];
+  /** The installed version's changelog, kept from a marketplace install. */
+  changelog?: string;
+  /** The changelogs of the kept versions that have one, by version. */
+  previousChangelogs?: Record<string, string>;
   /** Loaded from the dev plugins directory rather than installed. */
   dev?: boolean;
   configSchema?: Record<string, ConfigField>;
@@ -72,6 +81,7 @@ interface Props {
  * can turn it off, what it may do, and the versions kept for a rollback.
  */
 export function ExtensionDetailPage({ kind, id }: Props) {
+  const { dialogProps: confirmProps, confirm } = useConfirmDialog();
   const words = KIND_LABEL[kind];
   const listHref = adminPath(kind === 'plugin' ? 'plugins' : 'themes');
   const [entry, setEntry] = useState<ExtensionEntry | null>(null);
@@ -81,7 +91,7 @@ export function ExtensionDetailPage({ kind, id }: Props) {
   const [revealSecrets, setRevealSecrets] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useFlash();
+  const setMessage = useAdminFeedback();
   const iconFor = useExtensionIcons();
 
   const load = useCallback(async () => {
@@ -124,7 +134,12 @@ export function ExtensionDetailPage({ kind, id }: Props) {
   }, [schema, savedValues]);
 
   const dirty = Object.keys(savedValues).some((key) => (formValues[key] ?? '') !== savedValues[key]);
-  useAdminUnsavedChanges(`${kind}-config`, dirty);
+  // On/off and "force on" wait for Save like the settings below.
+  const [availabilityDraft, setAvailabilityDraft] = useState<{ enabled?: boolean; forceEnabled?: boolean }>({});
+  const shownForced = availabilityDraft.forceEnabled ?? !!entry?.forceEnabled;
+  const shownEnabled = shownForced || (availabilityDraft.enabled ?? !!entry?.enabled);
+  const availabilityDirty = !!entry && (shownEnabled !== entry.enabled || shownForced !== !!entry.forceEnabled);
+  useAdminUnsavedChanges(`${kind}-config`, dirty || availabilityDirty);
 
   async function saveConfig() {
     if (!schema) return;
@@ -202,21 +217,33 @@ export function ExtensionDetailPage({ kind, id }: Props) {
     }
   }
 
-  async function setEnabled(enabled: boolean) {
-    if (await patch({ enabled }, 'enabled')) setEntry((prev) => (prev ? { ...prev, enabled } : prev));
+  async function saveAvailability(): Promise<boolean> {
+    if (!entry) return true;
+    const body: Record<string, unknown> = {};
+    if (shownForced !== !!entry.forceEnabled) body.forceEnabled = shownForced;
+    if (shownEnabled !== entry.enabled) body.enabled = shownEnabled;
+    const ok = await patch(body, 'availability');
+    if (ok) setEntry((prev) => (prev ? { ...prev, enabled: shownEnabled, forceEnabled: shownForced } : prev));
+    setAvailabilityDraft({});
+    return ok;
   }
 
-  async function setForced(forceEnabled: boolean) {
-    const body: Record<string, unknown> = { forceEnabled };
-    if (forceEnabled) body.enabled = true;
-    if (await patch(body, 'forced')) {
-      setEntry((prev) => (prev ? { ...prev, forceEnabled, ...(forceEnabled ? { enabled: true } : {}) } : prev));
-    }
+  async function save() {
+    if (availabilityDirty && !(await saveAvailability())) return;
+    if (dirty) await saveConfig();
+    else setMessage({ type: 'success', text: 'Saved' });
   }
 
   async function rollback(version: string) {
     if (!entry) return;
-    if (!confirm(`Put v${version} of "${entry.name}" back in place of v${entry.version}? The copy kept on this server is used.`)) return;
+    const ok = await confirm({
+      title: `Roll back to v${version}?`,
+      message: `"${entry.name}" v${version} replaces v${entry.version}. The copy kept on this server is used.`
+        + (entry.changelog ? ` What v${entry.version} changed, listed under Versions, is undone.` : ''),
+      confirmText: 'Roll back',
+      cancelText: 'Cancel',
+    });
+    if (!ok) return;
     setBusy(`rollback:${version}`);
     setMessage(null);
     try {
@@ -239,7 +266,14 @@ export function ExtensionDetailPage({ kind, id }: Props) {
 
   async function remove() {
     if (!entry) return;
-    if (!confirm(`Remove "${entry.name}" for every user? Its kept versions are removed too; this cannot be undone.`)) return;
+    const ok = await confirm({
+      title: `Remove "${entry.name}"?`,
+      message: 'It is removed for every user, with the versions kept on this server. This cannot be undone.',
+      confirmText: 'Remove',
+      cancelText: 'Cancel',
+      variant: 'destructive',
+    });
+    if (!ok) return;
     setBusy('remove');
     setMessage(null);
     const res = await apiFetch(words.endpoint, {
@@ -310,8 +344,13 @@ export function ExtensionDetailPage({ kind, id }: Props) {
         actions={(
           <>
             <label className="flex h-9 items-center gap-2.5 rounded-md border border-input bg-background px-3 text-sm">
-              <span className={cn('font-medium', entry.enabled ? 'text-foreground' : 'text-muted-foreground')}>{entry.enabled ? 'On' : 'Off'}</span>
-              <ToggleSwitch checked={entry.enabled} disabled={busy === 'enabled'} onChange={(v) => void setEnabled(v)} ariaLabel={`${entry.name} enabled`} />
+              <span className={cn('font-medium', shownEnabled ? 'text-foreground' : 'text-muted-foreground')}>{shownEnabled ? 'On' : 'Off'}</span>
+              <ToggleSwitch
+                checked={shownEnabled}
+                disabled={busy === 'availability' || shownForced}
+                onChange={(v) => { setMessage(null); setAvailabilityDraft((prev) => ({ ...prev, enabled: v })); }}
+                ariaLabel={`${entry.name} enabled`}
+              />
             </label>
             <Button variant="outline" size="sm" className="gap-2 text-destructive hover:text-destructive" disabled={busy === 'remove'} onClick={() => void remove()}>
               {busy === 'remove' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
@@ -323,7 +362,7 @@ export function ExtensionDetailPage({ kind, id }: Props) {
 
       {entry.description && <p className="-mt-2 mb-6 text-sm text-foreground">{entry.description}</p>}
 
-      <Flash message={message} onDismiss={() => setMessage(null)} />
+      <ConfirmDialog {...confirmProps} />
 
       <div className="space-y-10">
         <SettingsSection id="availability" title="Availability" description={`Whether users get this ${words.one} and whether they can turn it off.`}>
@@ -333,7 +372,11 @@ export function ExtensionDetailPage({ kind, id }: Props) {
               ? 'Users cannot turn it off in their settings. Turning this on also enables the plugin.'
               : 'Users cannot deactivate it. Turning this on also enables the theme.'}
           >
-            <ToggleSwitch checked={!!entry.forceEnabled} disabled={busy === 'forced'} onChange={(v) => void setForced(v)} />
+            <ToggleSwitch
+              checked={shownForced}
+              disabled={busy === 'availability'}
+              onChange={(v) => { setMessage(null); setAvailabilityDraft((prev) => ({ ...prev, forceEnabled: v })); }}
+            />
           </SettingItem>
           <SettingItem label="Source" description={entry.source?.kind === 'marketplace' ? 'Installed from the extension directory; updates show up in the marketplace.' : 'Installed from an uploaded ZIP.'}>
             {entry.source?.kind === 'marketplace' ? (
@@ -368,16 +411,16 @@ export function ExtensionDetailPage({ kind, id }: Props) {
         )}
 
         <SettingsSection id="versions" title="Versions" description={previous.length === 0 ? 'No earlier version is kept on this server.' : 'Earlier versions kept on this server can be put back without the directory.'}>
-          <SettingItem label="Installed">
+          <VersionRow label="Installed" changelog={entry.changelog} notesLabel={`What's new in v${entry.version}`}>
             <span className="font-mono text-sm text-foreground">v{entry.version}</span>
-          </SettingItem>
+          </VersionRow>
           {previous.map((version) => (
-            <SettingItem key={version} label={`v${version}`} description="Kept on this server">
+            <VersionRow key={version} label={`v${version}`} description="Kept on this server" changelog={entry.previousChangelogs?.[version]} notesLabel="Changelog">
               <Button variant="outline" size="sm" className="gap-1.5" disabled={busy !== null} onClick={() => void rollback(version)}>
                 {busy === `rollback:${version}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
                 Roll back
               </Button>
-            </SettingItem>
+            </VersionRow>
           ))}
         </SettingsSection>
 
@@ -386,7 +429,14 @@ export function ExtensionDetailPage({ kind, id }: Props) {
         {/* The plugin's own settings come last: they are the long part. */}
         {kind === 'plugin' && hasSchema && schema && (
           <SettingsSection id="settings" title="Settings" description="What this plugin reads from the server. Saved for every user.">
-            {Object.entries(schema).map(([key, field]) => (
+            {Object.entries(schema).map(([key, field]) => field.type === 'string' && field.multiline ? (
+              <MultilineConfigItem
+                key={key}
+                field={field}
+                value={formValues[key] ?? ''}
+                onChange={(v) => setFormValues((prev) => ({ ...prev, [key]: v }))}
+              />
+            ) : (
               <SettingItem
                 key={key}
                 label={field.required ? `${field.label} *` : field.label}
@@ -407,12 +457,37 @@ export function ExtensionDetailPage({ kind, id }: Props) {
       </div>
 
       <AdminSaveBar
-        dirty={dirty}
-        saving={saving}
-        onSave={saveConfig}
-        onDiscard={() => setFormValues(savedValues)}
-        saveLabel="Save settings"
+        dirty={dirty || availabilityDirty}
+        saving={saving || busy === 'availability'}
+        onSave={() => void save()}
+        onDiscard={() => { setFormValues(savedValues); setAvailabilityDraft({}); }}
+        saveLabel="Save"
       />
+    </div>
+  );
+}
+
+/** A row of the Versions section: like a SettingItem, with the version's changelog under its label. */
+function VersionRow({ label, description, changelog, notesLabel, children }: {
+  label: string;
+  description?: string;
+  changelog?: string;
+  notesLabel: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-2 border-b border-border py-3 last:border-0 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      <div className="min-w-0 flex-1 sm:pe-4">
+        <p className="text-sm font-medium text-foreground">{label}</p>
+        {description && <p className="mt-1 text-xs text-muted-foreground">{description}</p>}
+        {changelog && (
+          <details className="mt-1.5">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">{notesLabel}</summary>
+            <ChangelogNotes markdown={changelog} className="mt-2" />
+          </details>
+        )}
+      </div>
+      <div className="flex-shrink-0">{children}</div>
     </div>
   );
 }
@@ -472,6 +547,35 @@ function ConfigFieldControl({ field, value, stored, revealed, onReveal, onChange
       autoComplete="off"
       className={cn(inputClass, width)}
     />
+  );
+}
+
+/**
+ * A setting that takes several lines: label and description on top, a
+ * full-width text box under them, as wide as the section.
+ */
+function MultilineConfigItem({ field, value, onChange }: {
+  field: ConfigField;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const id = useId();
+  return (
+    <div data-search-label={field.label} className="py-3 border-b border-border last:border-0">
+      <label htmlFor={id} className="text-sm font-medium text-foreground">
+        {field.required ? `${field.label} *` : field.label}
+      </label>
+      {field.description && <p id={`${id}-desc`} className="text-xs text-muted-foreground mt-1">{field.description}</p>}
+      <textarea
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={field.placeholder || ''}
+        aria-describedby={field.description ? `${id}-desc` : undefined}
+        rows={5}
+        className={cn(inputClass, 'mt-2 block h-auto min-h-24 w-full resize-y py-2 leading-relaxed')}
+      />
+    </div>
   );
 }
 
