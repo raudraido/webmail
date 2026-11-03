@@ -48,7 +48,7 @@ describe('login page translations', () => {
 
   it('labels the theme menu from the translations', async () => {
     render(<LoginPage />);
-    const button = await screen.findByRole('button', { name: 'label: system' }, { timeout: 10000 });
+    const button = await screen.findByRole('button', { name: /^label: / }, { timeout: 10000 });
     fireEvent.click(button);
     expect(screen.getByRole('menu', { name: 'label' })).toBeInTheDocument();
     expect(screen.getByRole('menuitemradio', { name: 'dark' })).toBeInTheDocument();

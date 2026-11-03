@@ -89,6 +89,14 @@ const probes: Record<string, () => Promise<boolean>> = {
     }));
     return fetchedHosts().includes('api.mymemory.translated.net');
   },
+  unsplash: async () => {
+    process.env.UNSPLASH_ACCESS_KEY = 'probe';
+    vi.resetModules();
+    const { GET } = await import('@/app/api/auth-background/route');
+    await GET();
+    delete process.env.UNSPLASH_ACCESS_KEY;
+    return fetchedHosts().includes('api.unsplash.com');
+  },
   maps: async () => mapsLinksAllowed(),
   wkd: async () => wkdAllowed(),
   'dev-avatars': async () => sampleAvatarsAllowed(),

@@ -80,7 +80,7 @@ function ThemeToggle() {
             ? "bg-secondary border-border text-foreground shadow-md"
             : "bg-background/60 backdrop-blur-sm border-border/50 text-muted-foreground hover:text-foreground hover:bg-secondary/80 hover:border-border"
         )}
-        aria-label={`Theme: ${t(current.value)}`}
+        aria-label={`${t("label")}: ${t(current.value)}`}
         aria-expanded={open}
         aria-haspopup="menu"
       >
@@ -96,7 +96,7 @@ function ThemeToggle() {
           // viewport instead of overlapping the form above it.
           className="absolute left-0 bottom-full mb-2 w-40 rounded-xl border border-border bg-background shadow-lg overflow-hidden animate-fade-in z-50"
           role="menu"
-          aria-label="Theme selection"
+          aria-label={t("label")}
         >
           {THEME_OPTIONS.map((option) => {
             const Icon = option.icon;

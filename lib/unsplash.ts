@@ -1,6 +1,9 @@
 import { getPathPrefix } from "@/lib/browser-navigation";
 
-const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
+import { isNoThirdPartyTrafficOn } from "@/lib/admin/third-party-mode";
+
+// Read per call, not at import: the outgoing-hosts mode test sets it.
+const accessKey = () => process.env.UNSPLASH_ACCESS_KEY;
 
 // Next's default responsive breakpoints (next.config.ts doesn't override
 // `images.deviceSizes`/`qualities`) — these are exactly the widths/quality
@@ -43,7 +46,9 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // hourly rotation
 let inFlight: Promise<void> | null = null;
 
 async function refreshCache(): Promise<void> {
-  if (!UNSPLASH_ACCESS_KEY) return;
+  if (!accessKey()) return;
+  // "No third-party traffic" mode (#903): no request to Unsplash at all.
+  if (await isNoThirdPartyTrafficOn()) return;
 
   try {
     const res = await fetch(
@@ -54,7 +59,7 @@ async function refreshCache(): Promise<void> {
       //   LYsufXSpz_4  "Lifestyle"
       "https://api.unsplash.com/photos/random?collections=1499877,zc6Lgu23wc8,LYsufXSpz_4&orientation=landscape&content_filter=high",
       {
-        headers: { Authorization: `Client-ID ${UNSPLASH_ACCESS_KEY}` },
+        headers: { Authorization: `Client-ID ${accessKey()}` },
         cache: "no-store",
       }
     );
@@ -76,7 +81,7 @@ async function refreshCache(): Promise<void> {
     // background) — fired once per new photo, not per page render.
     const downloadLocation: string | undefined = data.links.download_location;
     if (downloadLocation) {
-      fetch(`${downloadLocation}?client_id=${UNSPLASH_ACCESS_KEY}`).catch(
+      fetch(`${downloadLocation}?client_id=${accessKey()}`).catch(
         () => {}
       );
     }
@@ -99,6 +104,7 @@ async function ensureFresh(): Promise<void> {
 }
 
 export async function getNaturePhoto(): Promise<NaturePhoto | null> {
+  if (await isNoThirdPartyTrafficOn()) return null;
   await ensureFresh();
   return cached?.photo ?? null;
 }

@@ -124,7 +124,7 @@ export function AboutFooter() {
       {/* majutaja.com: when rebranded, keep crediting the upstream project (AGPL-3.0). Uses
           only the existing about.title key (the product name) so no locale needs a new string. */}
       {branded && (
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1 text-xs text-muted-foreground">
           <a
             href={UPSTREAM_SOURCE_URL}
             target="_blank"

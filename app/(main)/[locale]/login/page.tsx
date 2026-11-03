@@ -676,10 +676,13 @@ function LoginPageContent() {
   if (configLoading) {
     return (
       <AuthShell>
-        <div className="w-full max-w-sm mx-auto px-4 text-center" role="status">
-          <Loader2 className="w-8 h-8 animate-spin text-primary mx-auto" />
-          <span className="sr-only">{t("loading")}</span>
-        </div>
+        {/* The card's shape (upstream's LoginSkeleton, also what the server HTML and
+            the signed-out app pages show), inside our shell: no full-screen
+            background, no theme-button placeholder (AuthShell draws the real one). */}
+        <LoginSkeleton
+          label={t("loading")}
+          className="min-h-0 bg-none px-0 [&>div[aria-hidden=true]:first-child]:hidden"
+        />
       </AuthShell>
     );
   }
@@ -1242,9 +1245,13 @@ function LoginPageContent() {
               style={loginLogoStyle}
             />
           </div>
+          {loginShowHeading && (
+            // The brand shell shows the name as a logo; keep the page's heading for screen readers.
+            <h1 className="sr-only">{isAddAccountMode ? t("add_account_title") : appName}</h1>
+          )}
           {loginShowSubtitle && (
             <p className="text-sm text-muted-foreground">
-              {isAddAccountMode ? t("add_account_subtitle") : (t("title") !== appName ? t("title") : "Sign in to your account")}
+              {isAddAccountMode ? t("add_account_subtitle") : t("subtitle")}
             </p>
           )}
         </div>

@@ -85,6 +85,16 @@ export const OUTGOING_HOSTS: readonly OutgoingHost[] = [
     lite: false,
   },
   {
+    id: 'unsplash',
+    host: 'api.unsplash.com',
+    files: ['lib/unsplash.ts'],
+    side: 'server',
+    usedBy: 'majutaja.com brand layer: the rotating photo on the login page (/api/auth-background, hourly, plus the image optimizer fetching the photo from images.unsplash.com).',
+    off: 'Unset UNSPLASH_ACCESS_KEY; the login page then shows the plain brand gradient.',
+    inMode: '/api/auth-background answers null and the hourly refresh stays idle; the login page shows the brand gradient.',
+    lite: false,
+  },
+  {
     id: 'favicons',
     host: 'icons.duckduckgo.com',
     files: ['app/api/favicon/route.ts'],
@@ -172,6 +182,7 @@ export const NON_REQUEST_HOSTS: readonly { host: string; files: readonly string[
   { host: 'www.youtube-nocookie.com', why: 'example in a comment', files: ['lib/plugin-types.ts'] },
   { host: 'bulwark-webmail.vercel.app', why: 'sample message text', files: ['stores/email-store.ts'] },
   { host: 'randomuser.me', why: 'docs links in a comment of the mock server', files: ['app/api/dev-jmap/[...path]/route.ts'] },
+  { host: 'unsplash.com', why: 'photo credit link on the majutaja login page (the user clicks it, nothing requests it)', files: ['components/auth/auth-shell.tsx'] },
   { host: 'schema.org', why: 'vocabulary names in booking markup, matched and never requested', files: ['lib/structured-mail/extract.ts'] },
 ];
 
