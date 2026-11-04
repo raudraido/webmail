@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-<rect width="512" height="512" fill="#1d2d3d"/>
-<svg x="64" y="64" width="384" height="384" viewBox="0 0 100 100"><defs><mask id="mD" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><rect width="100" height="100" fill="#fff"/><g fill="#000"><rect x="7" y="7" width="14" height="14"/><rect x="79" y="7" width="14" height="14"/><rect x="7" y="79" width="14" height="14"/><rect x="79" y="79" width="14" height="14"/></g></mask></defs>
+<rect width="512" height="512" rx="32" fill="#1d2d3d"/>
+<svg x="36" y="36" width="440" height="440" viewBox="0 0 100 100"><defs><mask id="mD" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><rect width="100" height="100" fill="#fff"/><g fill="#000"><rect x="7" y="7" width="14" height="14"/><rect x="79" y="7" width="14" height="14"/><rect x="7" y="79" width="14" height="14"/><rect x="79" y="79" width="14" height="14"/></g></mask></defs>
 <g mask="url(#mD)"><path d="M14 14H86V86H14Z" fill="none" stroke="#5f7a94" stroke-width="6"/><path d="M14 86V14l36 44 36-44v72" fill="none" stroke="#ffffff" stroke-width="6" stroke-linejoin="miter"/></g>
 <g fill="none" stroke="#ffffff" stroke-width="6"><rect x="4" y="76" width="20" height="20"/><rect x="4" y="4" width="20" height="20"/><rect x="76" y="4" width="20" height="20"/><rect x="76" y="76" width="20" height="20"/></g>
 <rect x="40" y="48" width="20" height="20" fill="#ffffff"/></svg>
