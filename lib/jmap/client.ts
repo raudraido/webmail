@@ -1,4 +1,5 @@
 import { recordJmapCall, reportJmapFailure } from "@/lib/error-reporting/client";
+import { retryWhileBlobNotFound } from './blob-retry';
 import { advertisesMailboxMetadata, bulwarkEntries, escapeMetadataPathSegment, MAX_METADATA_ENTRY_BYTES, METADATA_CAPABILITY, MetadataPatchError, MetadataRefusedError, MetadataTooLargeError, MetadataUnsupportedError, metadataValueBytes, namespaceFor } from "./bulwark-metadata";
 import { IncompleteDeleteError } from "./delete-error";
 import { downloadAllowed, saveBlobAs, type DownloadKind } from "@/lib/download-guard";
@@ -6296,14 +6297,14 @@ export class JMAPClient implements IJMAPClient {
   ): Promise<string | null> {
     const targetAccountId = accountId || this.accountId;
     const creationId = `imp-${Date.now()}`;
-    const response = await this.request([
+    const response = await retryWhileBlobNotFound(() => this.request([
       ["Email/import", {
         accountId: targetAccountId,
         emails: {
           [creationId]: { blobId, mailboxIds, keywords: keywords || { "$seen": true } },
         },
       }, "0"],
-    ]);
+    ]), creationId);
     const res = response.methodResponses?.[0];
     if (res?.[0] !== "Email/import") {
       console.error('Email/import: unexpected response', res);
@@ -7105,9 +7106,9 @@ export class JMAPClient implements IJMAPClient {
       setArgs.onSuccessActivateScript = "#new-script";
     }
 
-    const response = await this.request([
+    const response = await retryWhileBlobNotFound(() => this.request([
       ["SieveScript/set", setArgs, "0"]
-    ], this.sieveUsing());
+    ], this.sieveUsing()), "new-script");
 
     if (response.methodResponses?.[0]?.[0] === "SieveScript/set") {
       const result = response.methodResponses[0][1];
@@ -7139,9 +7140,9 @@ export class JMAPClient implements IJMAPClient {
       setArgs.onSuccessActivateScript = scriptId;
     }
 
-    const response = await this.request([
+    const response = await retryWhileBlobNotFound(() => this.request([
       ["SieveScript/set", setArgs, "0"]
-    ], this.sieveUsing());
+    ], this.sieveUsing()), scriptId);
 
     if (response.methodResponses?.[0]?.[0] === "SieveScript/set") {
       const result = response.methodResponses[0][1];
