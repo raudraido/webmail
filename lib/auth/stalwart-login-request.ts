@@ -28,6 +28,22 @@ export const STALWART_LOGIN_SCOPE = [
   'urn:ietf:params:oauth:scope:files',
 ].join(' ');
 
+/**
+ * Adds scopes from a space-separated list (the admin's STALWART_LOGIN_EXTRA_SCOPE)
+ * to the default login scope, without duplicates. A Stalwart 1.x token only
+ * reaches the account's own settings (password, TOTP, app passwords, API keys)
+ * with `urn:stalwart:oauth:scope:full`, and only when the OAuthClient lists it;
+ * 0.16 ignores scopes. Majutaja sets it so signed-in users keep Settings >
+ * Security after the 0.16 -> 1.x migration.
+ */
+export function loginScopeWithExtras(extra?: string | null): string {
+  const scopes = new Set(STALWART_LOGIN_SCOPE.split(' '));
+  for (const scope of (extra ?? '').split(/\s+/)) {
+    if (scope) scopes.add(scope);
+  }
+  return [...scopes].join(' ');
+}
+
 export interface StalwartLoginRequest {
   username: string;
   password: string;
@@ -38,6 +54,8 @@ export interface StalwartLoginRequest {
   codeChallenge: string;
   /** Echoed back in 1.0's redirect location. */
   state: string;
+  /** Defaults to STALWART_LOGIN_SCOPE. */
+  scope?: string;
 }
 
 export function stalwartLoginBody(req: StalwartLoginRequest): Record<string, unknown> {
@@ -46,7 +64,7 @@ export function stalwartLoginBody(req: StalwartLoginRequest): Record<string, unk
     client_id: req.clientId,
     redirect_uri: req.redirectUri,
     state: req.state,
-    scope: STALWART_LOGIN_SCOPE,
+    scope: req.scope ?? STALWART_LOGIN_SCOPE,
     code_challenge: req.codeChallenge,
     code_challenge_method: 'S256',
   });

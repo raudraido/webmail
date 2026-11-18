@@ -6,6 +6,7 @@ import {
   STALWART_LOOPBACK_REDIRECT_URI,
   readStalwartLoginResponse,
   stalwartClientRegistration,
+  loginScopeWithExtras,
   stalwartLoginBody,
 } from '@/lib/auth/stalwart-login-request';
 
@@ -265,6 +266,7 @@ async function requestLoginCode(
         redirectUri: client.redirectUri ?? opts.redirectUri,
         codeChallenge: challenge,
         state,
+        scope: loginScopeWithExtras(process.env.STALWART_LOGIN_EXTRA_SCOPE),
       })),
     });
 
